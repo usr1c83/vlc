@@ -208,6 +208,13 @@ Audio output:
 
 Audio filter:
  * Add RNNoise recurrent neural network denoiser
+ * Add Gemma 4 live speech transcription/translation filter
+   (gemma_transcribe), rendering live subtitles through the new
+   "transcript" sub source. Inference runs either in-process through
+   llama.cpp/libmtmd on a local GGUF model, or against an OpenAI-compatible
+   or Google Generative Language API server. Optional per-speaker
+   voice-over synthesis through the built-in espeak-ng synthesizer or an
+   OpenAI-compatible text-to-speech server
  * Add noise gate, dynamic range expander and peak limiter filters
  * Add stereo pan and center channel upmixing filters
  * Add EBU R 128 audio meter plugin

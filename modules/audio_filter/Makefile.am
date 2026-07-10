@@ -62,6 +62,22 @@ libcenter_plugin_la_SOURCES = audio_filter/center.c
 libcenter_plugin_la_LIBADD  = $(LIBM)
 libstereopan_plugin_la_SOURCES = audio_filter/stereo_pan.c
 libstereopan_plugin_la_LIBADD = $(LIBM)
+libgemma_transcribe_plugin_la_SOURCES = \
+	audio_filter/transcribe/transcribe.c \
+	audio_filter/transcribe/transcribe.h \
+	audio_filter/transcribe/http.c
+libgemma_transcribe_plugin_la_CFLAGS = $(AM_CFLAGS)
+libgemma_transcribe_plugin_la_LIBADD = libvlc_http.la libvlc_json.la $(LIBM)
+if HAVE_ESPEAK_NG
+libgemma_transcribe_plugin_la_SOURCES += audio_filter/transcribe/espeak.c
+libgemma_transcribe_plugin_la_CFLAGS += $(ESPEAK_NG_CFLAGS)
+libgemma_transcribe_plugin_la_LIBADD += $(ESPEAK_NG_LIBS)
+endif
+if HAVE_LLAMACPP_MTMD
+libgemma_transcribe_plugin_la_SOURCES += audio_filter/transcribe/llama.c
+libgemma_transcribe_plugin_la_CFLAGS += $(LLAMACPP_CFLAGS)
+libgemma_transcribe_plugin_la_LIBADD += $(LLAMACPP_LIBS)
+endif
 
 audio_filter_PLUGINS += \
 	libaudiobargraph_a_plugin.la \
@@ -80,7 +96,8 @@ audio_filter_PLUGINS += \
 	libspatializer_plugin.la \
 	libstereo_widen_plugin.la \
 	libcenter_plugin.la \
-	libstereopan_plugin.la
+	libstereopan_plugin.la \
+	libgemma_transcribe_plugin.la
 
 # Channel mixers
 libdolby_surround_decoder_plugin_la_SOURCES = \

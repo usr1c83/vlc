@@ -3170,6 +3170,55 @@ dnl
 PKG_ENABLE_MODULES_VLC([RNNOISE], [], [rnnoise], [Rnnoise denoiser], [auto])
 
 dnl
+dnl  llama.cpp with libmtmd - built-in Gemma inference for the transcription
+dnl  filter
+dnl
+AC_ARG_ENABLE([llamacpp],
+  AS_HELP_STRING([--disable-llamacpp],
+    [disable built-in Gemma 4 inference through llama.cpp (default auto)]))
+have_llamacpp_mtmd="no"
+AS_IF([test "${enable_llamacpp}" != "no"], [
+  PKG_CHECK_MODULES([LLAMACPP], [llama], [
+    save_CPPFLAGS="$CPPFLAGS"
+    save_LIBS="$LIBS"
+    CPPFLAGS="$CPPFLAGS $LLAMACPP_CFLAGS"
+    AC_CHECK_HEADERS([mtmd.h])
+    AC_CHECK_LIB([mtmd], [mtmd_init_from_file], [
+      AS_IF([test "$ac_cv_header_mtmd_h" = "yes"], [
+        have_llamacpp_mtmd="yes"
+        LLAMACPP_LIBS="$LLAMACPP_LIBS -lmtmd"
+        AC_DEFINE([HAVE_LLAMACPP_MTMD], [1],
+                  [Define to 1 if llama.cpp with libmtmd is available.])
+      ])
+    ], [], [$LLAMACPP_LIBS])
+    CPPFLAGS="$save_CPPFLAGS"
+    LIBS="$save_LIBS"
+  ], [:])
+  AS_IF([test "${enable_llamacpp}" = "yes" -a "$have_llamacpp_mtmd" != "yes"],
+    [AC_MSG_ERROR([llama.cpp with libmtmd was not found])])
+])
+AM_CONDITIONAL([HAVE_LLAMACPP_MTMD], [test "$have_llamacpp_mtmd" = "yes"])
+
+dnl
+dnl  espeak-ng - built-in speech synthesis for the transcription voice-over
+dnl
+AC_ARG_ENABLE([espeak-ng],
+  AS_HELP_STRING([--disable-espeak-ng],
+    [disable built-in voice-over synthesis through espeak-ng (default auto)]))
+have_espeak_ng="no"
+AS_IF([test "${enable_espeak_ng}" != "no"], [
+  PKG_CHECK_MODULES([ESPEAK_NG], [espeak-ng], [
+    have_espeak_ng="yes"
+    AC_DEFINE([HAVE_ESPEAK_NG], [1],
+              [Define to 1 if espeak-ng is available.])
+  ], [
+    AS_IF([test "${enable_espeak_ng}" = "yes"],
+      [AC_MSG_ERROR([espeak-ng was not found])])
+  ])
+])
+AM_CONDITIONAL([HAVE_ESPEAK_NG], [test "$have_espeak_ng" = "yes"])
+
+dnl
 dnl  Opus plugin
 dnl
 PKG_ENABLE_MODULES_VLC([OPUS], [], [ogg opus >= 1.0.3], [Opus support], [auto])

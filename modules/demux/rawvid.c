@@ -125,10 +125,10 @@ static int Open( vlc_object_t * p_this )
     demux_t     *p_demux = (demux_t*)p_this;
     demux_sys_t *p_sys;
     int i_width=-1, i_height=-1;
-    unsigned u_fps_num, u_fps_den;
+    unsigned u_fps_num = 0, u_fps_den = 1;
     vlc_fourcc_t i_chroma = 0;
-    unsigned int i_sar_num;
-    unsigned int i_sar_den;
+    unsigned int i_sar_num = 0;
+    unsigned int i_sar_den = 0;
     const struct preset_t *p_preset = NULL;
     const uint8_t *p_peek;
     bool b_y4m = false;
@@ -291,15 +291,22 @@ valid:
         free( psz_tmp );
     }
 
-    if( var_InheritURational( p_demux, &u_fps_num, &u_fps_den, "rawvid-fps" ) )
+    unsigned u_opt_num, u_opt_den;
+    if( !var_InheritURational( p_demux, &u_opt_num, &u_opt_den,
+                               "rawvid-fps" )
+     && u_opt_num != 0 && u_opt_den != 0 )
     {
-        u_fps_num = 0;
-        u_fps_den = 1;
+        u_fps_num = u_opt_num;
+        u_fps_den = u_opt_den;
     }
 
-    if( var_InheritURational( p_demux, &i_sar_num, &i_sar_den,
-                              "rawvid-aspect-ratio" ) )
-        i_sar_num = i_sar_den = 1;
+    if( !var_InheritURational( p_demux, &u_opt_num, &u_opt_den,
+                               "rawvid-aspect-ratio" )
+     && u_opt_num != 0 && u_opt_den != 0 )
+    {
+        i_sar_num = u_opt_num;
+        i_sar_den = u_opt_den;
+    }
 
     /* moan about anything wrong */
     if( i_width <= 0 || i_height <= 0 )
