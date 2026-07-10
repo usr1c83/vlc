@@ -283,9 +283,32 @@ if rnnoise_dep.found()
 endif
 
 # Gemma 4 live transcription filter
+gemma_transcribe_sources = files(
+    'transcribe/transcribe.c',
+    'transcribe/http.c',
+)
+gemma_transcribe_deps = [m_lib, socket_libs]
+gemma_transcribe_args = []
+
+espeak_ng_dep = dependency('espeak-ng', required: false)
+if espeak_ng_dep.found()
+    gemma_transcribe_sources += files('transcribe/espeak.c')
+    gemma_transcribe_deps += espeak_ng_dep
+    gemma_transcribe_args += '-DHAVE_ESPEAK_NG=1'
+endif
+
+llama_dep = dependency('llama', required: false)
+mtmd_dep = cc.find_library('mtmd', required: false)
+if llama_dep.found() and mtmd_dep.found() and cc.has_header('mtmd.h', dependencies: llama_dep)
+    gemma_transcribe_sources += files('transcribe/llama.c')
+    gemma_transcribe_deps += [llama_dep, mtmd_dep]
+    gemma_transcribe_args += '-DHAVE_LLAMACPP_MTMD=1'
+endif
+
 vlc_modules += {
     'name' : 'gemma_transcribe',
-    'sources' : files('gemma_transcribe.c'),
-    'dependencies' : [m_lib, socket_libs],
+    'sources' : gemma_transcribe_sources,
+    'dependencies' : gemma_transcribe_deps,
+    'c_args' : gemma_transcribe_args,
     'link_with' : [vlc_http_lib, vlc_json_lib],
 }

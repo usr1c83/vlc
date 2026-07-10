@@ -235,7 +235,6 @@ modules/audio_filter/converter/tospdif.c
 modules/audio_filter/equalizer.c
 modules/audio_filter/equalizer_presets.h
 modules/audio_filter/gain.c
-modules/audio_filter/gemma_transcribe.c
 modules/audio_filter/karaoke.c
 modules/audio_filter/normvol.c
 modules/audio_filter/param_eq.c
@@ -247,6 +246,10 @@ modules/audio_filter/rnnoise.c
 modules/audio_filter/scaletempo.c
 modules/audio_filter/spatializer/spatializer.cpp
 modules/audio_filter/stereo_widen.c
+modules/audio_filter/transcribe/espeak.c
+modules/audio_filter/transcribe/http.c
+modules/audio_filter/transcribe/llama.c
+modules/audio_filter/transcribe/transcribe.c
 modules/audio_mixer/float.c
 modules/audio_mixer/integer.c
 modules/audio_output/adummy.c
