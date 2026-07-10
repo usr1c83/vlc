@@ -47,3 +47,9 @@ vlc_modules += {
         'dynamicoverlay/dynamicoverlay.c'
     )
 }
+
+# live transcription subtitle display
+vlc_modules += {
+    'name' : 'transcript',
+    'sources' : files('transcript.c')
+}
