@@ -281,3 +281,11 @@ if rnnoise_dep.found()
 	'dependencies' : [m_lib, rnnoise_dep]
     }
 endif
+
+# Gemma 4 live transcription filter
+vlc_modules += {
+    'name' : 'gemma_transcribe',
+    'sources' : files('gemma_transcribe.c'),
+    'dependencies' : [m_lib, socket_libs],
+    'link_with' : [vlc_http_lib, vlc_json_lib],
+}

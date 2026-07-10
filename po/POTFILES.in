@@ -235,6 +235,7 @@ modules/audio_filter/converter/tospdif.c
 modules/audio_filter/equalizer.c
 modules/audio_filter/equalizer_presets.h
 modules/audio_filter/gain.c
+modules/audio_filter/gemma_transcribe.c
 modules/audio_filter/karaoke.c
 modules/audio_filter/normvol.c
 modules/audio_filter/param_eq.c
@@ -1232,6 +1233,7 @@ modules/spu/marq.c
 modules/spu/mosaic.c
 modules/spu/rss.c
 modules/spu/subsdelay.c
+modules/spu/transcript.c
 modules/stream_extractor/archive.c
 modules/stream_filter/adf.c
 modules/stream_filter/aribcam.c

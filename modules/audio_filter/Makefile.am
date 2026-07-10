@@ -62,6 +62,8 @@ libcenter_plugin_la_SOURCES = audio_filter/center.c
 libcenter_plugin_la_LIBADD  = $(LIBM)
 libstereopan_plugin_la_SOURCES = audio_filter/stereo_pan.c
 libstereopan_plugin_la_LIBADD = $(LIBM)
+libgemma_transcribe_plugin_la_SOURCES = audio_filter/gemma_transcribe.c
+libgemma_transcribe_plugin_la_LIBADD = libvlc_http.la libvlc_json.la $(LIBM)
 
 audio_filter_PLUGINS += \
 	libaudiobargraph_a_plugin.la \
@@ -80,7 +82,8 @@ audio_filter_PLUGINS += \
 	libspatializer_plugin.la \
 	libstereo_widen_plugin.la \
 	libcenter_plugin.la \
-	libstereopan_plugin.la
+	libstereopan_plugin.la \
+	libgemma_transcribe_plugin.la
 
 # Channel mixers
 libdolby_surround_decoder_plugin_la_SOURCES = \
