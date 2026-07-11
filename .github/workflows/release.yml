@@ -41,13 +41,17 @@ jobs:
           sudo sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources
           sudo apt-get update
           sudo apt-get build-dep -y vlc
+          # Qt 6 developer tools (qsb, qmlcachegen, lupdate) live outside PATH
+          echo "/usr/lib/qt6/bin" >> "$GITHUB_PATH"
+          echo "/usr/lib/qt6/libexec" >> "$GITHUB_PATH"
           sudo apt-get install -y --no-install-recommends \
             build-essential autoconf automake libtool pkg-config flex bison \
             gettext autopoint cmake ninja-build git ca-certificates curl \
             zstd p7zip-full liblua5.2-dev lua5.2 wget aria2 \
             qt6-base-dev qt6-base-private-dev qt6-declarative-dev \
             qt6-declarative-private-dev qt6-declarative-dev-tools \
-            qt6-svg-dev qt6-wayland qml6-module-* \
+            qt6-shader-baker qt6-l10n-tools qt6-svg-dev qt6-wayland \
+            qml6-module-* \
             libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
             libasound2-dev libpulse-dev libx11-dev libxcb1-dev \
             libxcb-shm0-dev libxcb-composite0-dev libxcb-xkb-dev \
