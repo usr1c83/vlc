@@ -35,6 +35,7 @@
 
 #include <errno.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include <vlc_common.h>
 #include <vlc_configuration.h>
@@ -60,124 +61,192 @@ static const char *UrlBasename(const char *url)
     return (name != NULL && name[1] != '\0') ? name + 1 : NULL;
 }
 
+/* Interrupted downloads are retried this many times, resuming from the
+ * last received byte. */
+#define DOWNLOAD_TRIES 10
+
 /**
- * Downloads url into dir/name, showing a progress dialog.
- * Returns the file path on success.
+ * Sleeps between download attempts, aborting early on cancellation.
+ * Returns false when the download was cancelled.
+ */
+static bool RetryWait(filter_t *filter, vlc_dialog_id *dialog,
+                      unsigned attempt)
+{
+    unsigned seconds = (attempt < 5) ? (2 * attempt) : 10;
+
+    for (unsigned i = 0; i < seconds; i++)
+    {
+        if (dialog != NULL && vlc_dialog_is_cancelled(filter, dialog))
+            return false;
+        vlc_tick_sleep(VLC_TICK_FROM_SEC(1));
+    }
+    return true;
+}
+
+/**
+ * Downloads url into dir/name, with a progress dialog, retries and
+ * resumption of partial downloads. Returns the file path on success.
  */
 static char *Fetch(filter_t *filter, const char *url, const char *dir,
                    const char *name)
 {
     char *dest, *part = NULL;
-    stream_t *stream = NULL;
     FILE *out = NULL;
     vlc_dialog_id *dialog = NULL;
+    bool keep_part = false;
 
     if (asprintf(&dest, "%s" DIR_SEP "%s", dir, name) < 0)
         return NULL;
     if (asprintf(&part, "%s.part", dest) < 0)
         goto error;
 
-    stream = vlc_stream_NewURL(filter, url);
-    if (stream == NULL)
+    /* Resume a previously interrupted download */
+    uint64_t done = 0;
+    struct stat st;
+    if (vlc_stat(part, &st) == 0 && st.st_size > 0)
     {
-        msg_Err(filter, "cannot fetch model from %s", url);
-        goto error;
+        done = st.st_size;
+        msg_Info(filter, "resuming download of %s at %"PRIu64" MiB", name,
+                 done >> 20);
     }
 
-    uint64_t total = 0;
-    vlc_stream_GetSize(stream, &total);
-
-    out = vlc_fopen(part, "wb");
+    out = vlc_fopen(part, (done > 0) ? "ab" : "wb");
     if (out == NULL)
     {
         msg_Err(filter, "cannot write %s: %s", part, vlc_strerror_c(errno));
         goto error;
     }
 
-    msg_Info(filter, "downloading %s (%.1f MiB) to %s", url,
-             total / 1048576., dest);
-    dialog = vlc_dialog_display_progress(filter, total == 0, 0.f,
-                                         _("Cancel"),
+    msg_Info(filter, "downloading %s to %s", url, dest);
+    dialog = vlc_dialog_display_progress(filter, false, 0.f, _("Cancel"),
                                          _("Downloading model"),
                                          _("Downloading the speech "
                                            "transcription model %s…"), name);
 
-    uint64_t done = 0, logged = 0;
-    for (;;)
+    uint64_t total = 0, logged = done;
+
+    for (unsigned attempt = 1; attempt <= DOWNLOAD_TRIES; attempt++)
     {
-        char buf[65536];
-        ssize_t val = vlc_stream_Read(stream, buf, sizeof (buf));
-        if (val < 0)
+        if (attempt > 1)
         {
-            msg_Err(filter, "download of %s failed", url);
-            goto error;
-        }
-        if (val == 0)
-            break;
-
-        if (fwrite(buf, 1, val, out) != (size_t)val)
-        {
-            msg_Err(filter, "cannot write %s: %s", part,
-                    vlc_strerror_c(errno));
-            goto error;
-        }
-        done += val;
-
-        if (dialog != NULL)
-        {
-            if (vlc_dialog_is_cancelled(filter, dialog))
+            msg_Warn(filter, "download interrupted at %"PRIu64" MiB, "
+                     "retrying (%u/%u)", done >> 20, attempt,
+                     (unsigned)DOWNLOAD_TRIES);
+            if (!RetryWait(filter, dialog, attempt))
             {
                 msg_Warn(filter, "model download cancelled");
+                keep_part = true;
                 goto error;
             }
-            if (total > 0)
-                vlc_dialog_update_progress(filter, dialog,
-                                           (float)done / total);
         }
-        if (done - logged >= (100u << 20))
-        {   /* log every 100 MiB for console users */
-            msg_Info(filter, "downloaded %"PRIu64" / %"PRIu64" MiB",
-                     done >> 20, total >> 20);
-            logged = done;
+
+        stream_t *stream = vlc_stream_NewURL(filter, url);
+        if (stream == NULL)
+            continue;
+
+        uint64_t size;
+        if (vlc_stream_GetSize(stream, &size) == 0 && size > 0)
+            total = size;
+
+        if (done > 0 && vlc_stream_Seek(stream, done))
+        {   /* No resumption support: restart from scratch */
+            msg_Warn(filter, "cannot resume download, restarting");
+            if (fseek(out, 0, SEEK_SET) || ftruncate(fileno(out), 0))
+            {
+                vlc_stream_Delete(stream);
+                goto error;
+            }
+            done = 0;
         }
+
+        bool failed = false;
+        while (total == 0 || done < total)
+        {
+            char buf[65536];
+            ssize_t val = vlc_stream_Read(stream, buf, sizeof (buf));
+            if (val < 0)
+            {
+                failed = true;
+                break;
+            }
+            if (val == 0)
+                break;
+
+            if (fwrite(buf, 1, val, out) != (size_t)val)
+            {
+                msg_Err(filter, "cannot write %s: %s", part,
+                        vlc_strerror_c(errno));
+                vlc_stream_Delete(stream);
+                keep_part = true;
+                goto error;
+            }
+            done += val;
+
+            if (dialog != NULL)
+            {
+                if (vlc_dialog_is_cancelled(filter, dialog))
+                {
+                    msg_Warn(filter, "model download cancelled");
+                    vlc_stream_Delete(stream);
+                    keep_part = true;
+                    goto error;
+                }
+                if (total > 0)
+                    vlc_dialog_update_progress(filter, dialog,
+                                               (float)done / total);
+            }
+            if (done - logged >= (100u << 20))
+            {   /* log every 100 MiB for console users */
+                msg_Info(filter, "downloaded %"PRIu64" / %"PRIu64" MiB",
+                         done >> 20, total >> 20);
+                logged = done;
+            }
+        }
+        vlc_stream_Delete(stream);
+
+        if (!failed && (total == 0 || done >= total))
+        {
+            if (total == 0 && done == 0)
+                continue; /* empty answer, try again */
+
+            fflush(out);
+            if (fclose(out))
+            {
+                out = NULL;
+                keep_part = true;
+                goto error;
+            }
+            out = NULL;
+
+            if (vlc_rename(part, dest))
+            {
+                msg_Err(filter, "cannot rename %s: %s", part,
+                        vlc_strerror_c(errno));
+                keep_part = true;
+                goto error;
+            }
+
+            msg_Info(filter, "model saved as %s", dest);
+            if (dialog != NULL)
+                vlc_dialog_release(filter, dialog);
+            free(part);
+            return dest;
+        }
+
+        fflush(out); /* keep the partial data for the next attempt */
     }
 
-    if (total > 0 && done < total)
-    {
-        msg_Err(filter, "truncated download of %s (%"PRIu64" / %"PRIu64")",
-                url, done, total);
-        goto error;
-    }
-
-    if (fclose(out))
-    {
-        out = NULL;
-        goto error;
-    }
-    out = NULL;
-
-    if (vlc_rename(part, dest))
-    {
-        msg_Err(filter, "cannot rename %s: %s", part, vlc_strerror_c(errno));
-        goto error;
-    }
-
-    msg_Info(filter, "model saved as %s", dest);
-    if (dialog != NULL)
-        vlc_dialog_release(filter, dialog);
-    vlc_stream_Delete(stream);
-    free(part);
-    return dest;
+    msg_Err(filter, "download of %s failed after %u attempts", url,
+            (unsigned)DOWNLOAD_TRIES);
+    keep_part = true; /* resume on the next run */
 
 error:
     if (dialog != NULL)
         vlc_dialog_release(filter, dialog);
     if (out != NULL)
         fclose(out);
-    if (part != NULL)
+    if (part != NULL && !keep_part)
         vlc_unlink(part);
-    if (stream != NULL)
-        vlc_stream_Delete(stream);
     free(part);
     free(dest);
     return NULL;
