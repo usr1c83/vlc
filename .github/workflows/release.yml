@@ -11,6 +11,10 @@ name: release
 on:
   push:
     tags: ['v*']
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+      - 'modules/audio_filter/transcribe/**'
   workflow_dispatch:
 
 env:
@@ -101,10 +105,16 @@ jobs:
           # espeak-ng voice data
           cp -a /usr/lib/x86_64-linux-gnu/espeak-ng-data "$B/share/vlc/espeak-ng-data"
 
-          # Gemma model weights (baked into the package)
+          # Gemma model weights (baked into the package; small
+          # placeholders on pull-request debug runs)
           mkdir -p "$B/share/vlc/gemma"
-          curl -fsSL "$MODEL_URL" -o "$B/share/vlc/gemma/$(basename "$MODEL_URL")"
-          curl -fsSL "$MMPROJ_URL" -o "$B/share/vlc/gemma/$(basename "$MMPROJ_URL")"
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            head -c 8388608 /dev/zero > "$B/share/vlc/gemma/$(basename "$MODEL_URL")"
+            head -c 1048576 /dev/zero > "$B/share/vlc/gemma/$(basename "$MMPROJ_URL")"
+          else
+            curl -fsSL "$MODEL_URL" -o "$B/share/vlc/gemma/$(basename "$MODEL_URL")"
+            curl -fsSL "$MMPROJ_URL" -o "$B/share/vlc/gemma/$(basename "$MMPROJ_URL")"
+          fi
 
           # Launcher
           cat > "$B/vlc.sh" << 'EOF'
@@ -232,10 +242,16 @@ jobs:
           # espeak voice data next to the data dir used by the plugin
           cp -a /usr/lib/*/espeak-ng-data "$B/espeak-ng-data" 2>/dev/null || \
             cp -a /usr/share/espeak-ng-data "$B/espeak-ng-data"
-          # Gemma model weights (baked into the package)
+          # Gemma model weights (baked into the package; small
+          # placeholders on pull-request debug runs)
           mkdir -p "$B/gemma"
-          curl -fsSL "$MODEL_URL" -o "$B/gemma/$(basename "$MODEL_URL")"
-          curl -fsSL "$MMPROJ_URL" -o "$B/gemma/$(basename "$MMPROJ_URL")"
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            head -c 8388608 /dev/zero > "$B/gemma/$(basename "$MODEL_URL")"
+            head -c 1048576 /dev/zero > "$B/gemma/$(basename "$MMPROJ_URL")"
+          else
+            curl -fsSL "$MODEL_URL" -o "$B/gemma/$(basename "$MODEL_URL")"
+            curl -fsSL "$MMPROJ_URL" -o "$B/gemma/$(basename "$MMPROJ_URL")"
+          fi
           cat > "$B/README-TRANSLATE.txt" << 'EOF'
           VLC with Gemma 4 live translation (Windows x86_64)
           ==================================================
@@ -261,6 +277,7 @@ jobs:
           compression-level: 0
 
   release:
+    if: github.event_name != 'pull_request'
     needs: [linux, windows]
     runs-on: ubuntu-24.04
     permissions:
