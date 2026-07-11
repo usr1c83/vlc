@@ -300,7 +300,7 @@ endif
 llama_dep = dependency('llama', required: false)
 mtmd_dep = cc.find_library('mtmd', required: false)
 if llama_dep.found() and mtmd_dep.found() and cc.has_header('mtmd.h', dependencies: llama_dep)
-    gemma_transcribe_sources += files('transcribe/llama.c')
+    gemma_transcribe_sources += files('transcribe/llama.c', 'transcribe/download.c')
     gemma_transcribe_deps += [llama_dep, mtmd_dep]
     gemma_transcribe_args += '-DHAVE_LLAMACPP_MTMD=1'
 endif

@@ -214,7 +214,10 @@ Audio filter:
    llama.cpp/libmtmd on a local GGUF model, or against an OpenAI-compatible
    or Google Generative Language API server. Optional per-speaker
    voice-over synthesis through the built-in espeak-ng synthesizer or an
-   OpenAI-compatible text-to-speech server
+   OpenAI-compatible text-to-speech server. The model can be downloaded
+   automatically. Supports exporting the transcription as SRT subtitles
+   and the voice-over as a WAV dubbing track, and a listen mode that
+   translates the system audio captured from another application
  * Add noise gate, dynamic range expander and peak limiter filters
  * Add stereo pan and center channel upmixing filters
  * Add EBU R 128 audio meter plugin
