@@ -45,12 +45,23 @@
  *   vlc --audio-filter=gemma_transcribe --sub-source=transcript \
  *       --gemma-transcribe-language=Russian --gemma-transcribe-voiceover \
  *       input.mkv
+ *
+ * The transcription can be exported as a SubRip subtitle file and the
+ * synthesized voice-over as a timeline-aligned WAV track. In listen mode
+ * the filter translates whatever another application is playing: feed it
+ * an audio capture of the system output and VLC outputs only the
+ * translation:
+ *
+ *   vlc pulse://$(pactl get-default-sink).monitor \
+ *       --audio-filter=gemma_transcribe --gemma-transcribe-listen \
+ *       --gemma-transcribe-voiceover --gemma-transcribe-language=Russian
  */
 
 #ifdef HAVE_CONFIG_H
 # include "config.h"
 #endif
 
+#include <errno.h>
 #include <math.h>
 #include <stdatomic.h>
 
@@ -60,6 +71,7 @@
 #include <vlc_aout.h>
 #include <vlc_block.h>
 #include <vlc_filter.h>
+#include <vlc_fs.h>
 #include <vlc_memstream.h>
 #include <vlc_queue.h>
 #include <vlc_variables.h>
@@ -83,8 +95,16 @@ typedef struct
 {
     struct transcribe_backend backend;
     bool voiceover;
+    bool listen;   /* translate-only mode: never output the original */
+    float idle_gain;
     struct tts_backend tts;
     char *prompt;
+
+    /* Subtitle/audio export (worker thread only after Open) */
+    FILE *srt;
+    unsigned srt_seq;
+    FILE *wav;
+    uint64_t wav_samples;
 
     /* Mono 16 kHz conversion state (audio thread only) */
     unsigned channels;
@@ -95,6 +115,7 @@ typedef struct
     int16_t *buf;
     size_t fill;
     size_t target;
+    vlc_tick_t seg_pts;   /* PTS of the first sample of the segment */
 
     /* Inference pipeline */
     vlc_queue_t queue;
@@ -249,16 +270,18 @@ static void MixEnqueue(filter_t *filter, block_t *b)
 
 /**
  * Overlays pending synthesized speech onto the outgoing audio, smoothly
- * ducking the original program under the voice-over.
+ * ducking the original program under the voice-over. In listen mode the
+ * original is muted entirely and only the voice-over is audible.
  */
 static void MixVoiceover(filter_t *filter, block_t *b)
 {
     filter_sys_t *sys = filter->p_sys;
     float *pcm = (float *)b->p_buffer;
     const unsigned channels = sys->channels;
+    const float idle = sys->idle_gain;
 
     vlc_mutex_lock(&sys->mix_lock);
-    if (sys->mix_first == NULL && sys->gain > 0.999f)
+    if (sys->mix_first == NULL && idle == 1.f && sys->gain > 0.999f)
     {
         sys->gain = 1.f;
         vlc_mutex_unlock(&sys->mix_lock);
@@ -268,13 +291,13 @@ static void MixVoiceover(filter_t *filter, block_t *b)
     for (size_t i = 0; i < b->i_nb_samples; i++)
     {
         float tts = 0.f;
-        float gain_target = 1.f;
+        float gain_target = idle;
         block_t *m = sys->mix_first;
 
         if (m != NULL)
         {
             tts = ((const float *)m->p_buffer)[sys->mix_offset];
-            gain_target = sys->duck;
+            gain_target = (sys->duck < idle) ? sys->duck : idle;
             sys->mix_depth--;
             if (++sys->mix_offset >= m->i_nb_samples)
             {
@@ -300,6 +323,109 @@ static void MixVoiceover(filter_t *filter, block_t *b)
         }
     }
     vlc_mutex_unlock(&sys->mix_lock);
+}
+
+/*****************************************************************************
+ * Subtitle and voice-over export (worker thread only)
+ *****************************************************************************/
+
+/**
+ * Appends one numbered SRT entry covering the segment interval.
+ */
+static void SrtWrite(filter_t *filter, vlc_tick_t pts, vlc_tick_t length,
+                     const char *text)
+{
+    filter_sys_t *sys = filter->p_sys;
+
+    if (sys->srt == NULL || text[0] == '\0' || pts == VLC_TICK_INVALID)
+        return;
+
+    uint64_t t0 = (pts > VLC_TICK_0) ? MS_FROM_VLC_TICK(pts - VLC_TICK_0) : 0;
+    uint64_t t1 = t0 + MS_FROM_VLC_TICK(length);
+
+    fprintf(sys->srt, "%u\n"
+            "%02"PRIu64":%02"PRIu64":%02"PRIu64",%03"PRIu64" --> "
+            "%02"PRIu64":%02"PRIu64":%02"PRIu64",%03"PRIu64"\n%s\n\n",
+            ++sys->srt_seq,
+            t0 / 3600000, (t0 / 60000) % 60, (t0 / 1000) % 60, t0 % 1000,
+            t1 / 3600000, (t1 / 60000) % 60, (t1 / 1000) % 60, t1 % 1000,
+            text);
+    fflush(sys->srt);
+}
+
+static void WavWriteHeader(FILE *f, unsigned rate, uint64_t samples)
+{
+    uint8_t hdr[44];
+    uint32_t data_size = (samples * 2 > UINT32_MAX - 36)
+        ? UINT32_MAX - 36 : samples * 2;
+
+    memcpy(hdr, "RIFF", 4);
+    SetDWLE(hdr + 4, 36 + data_size);
+    memcpy(hdr + 8, "WAVEfmt ", 8);
+    SetDWLE(hdr + 16, 16);
+    SetWLE(hdr + 20, 1);              /* PCM */
+    SetWLE(hdr + 22, 1);              /* mono */
+    SetDWLE(hdr + 24, rate);
+    SetDWLE(hdr + 28, rate * 2);      /* byte rate */
+    SetWLE(hdr + 32, 2);              /* block align */
+    SetWLE(hdr + 34, 16);             /* bits per sample */
+    memcpy(hdr + 36, "data", 4);
+    SetDWLE(hdr + 40, data_size);
+    fwrite(hdr, 1, sizeof (hdr), f);
+}
+
+/**
+ * Appends one synthesized utterance to the exported translation track,
+ * padding with silence up to its timeline position.
+ */
+static void WavExport(filter_t *filter, vlc_tick_t pts, const block_t *b)
+{
+    filter_sys_t *sys = filter->p_sys;
+
+    if (sys->wav == NULL)
+        return;
+
+    if (pts != VLC_TICK_INVALID && pts > VLC_TICK_0)
+    {
+        uint64_t start = samples_from_vlc_tick(pts - VLC_TICK_0, sys->rate);
+        static const uint8_t zeros[8192] = { 0 };
+
+        while (sys->wav_samples < start)
+        {
+            size_t n = start - sys->wav_samples;
+            if (n > sizeof (zeros) / 2)
+                n = sizeof (zeros) / 2;
+            if (fwrite(zeros, 2, n, sys->wav) != n)
+                return;
+            sys->wav_samples += n;
+        }
+    }
+
+    const float *in = (const float *)b->p_buffer;
+    for (size_t i = 0; i < b->i_nb_samples; i++)
+    {
+        long v = lrintf(in[i] * 32767.f);
+        if (v > INT16_MAX)
+            v = INT16_MAX;
+        else if (v < INT16_MIN)
+            v = INT16_MIN;
+
+        uint8_t sample[2];
+        SetWLE(sample, (uint16_t)(int16_t)v);
+        if (fwrite(sample, 2, 1, sys->wav) != 1)
+            return;
+    }
+    sys->wav_samples += b->i_nb_samples;
+}
+
+/**
+ * Publishes the transcription: subtitle variable and SRT export.
+ */
+static void PublishText(filter_t *filter, const char *text, vlc_tick_t pts,
+                        vlc_tick_t length)
+{
+    var_SetString(vlc_object_instance(filter), GEMMA_TRANSCRIPT_VAR, text);
+    SrtWrite(filter, pts, length, text);
 }
 
 /*****************************************************************************
@@ -354,7 +480,8 @@ static const char *ParseSpeakerLine(const char *line, unsigned *speaker)
  * Splits a diarized transcription into utterances, publishes the subtitle
  * text and synthesizes the voice-over.
  */
-static void HandleUtterances(filter_t *filter, char *text)
+static void HandleUtterances(filter_t *filter, char *text, vlc_tick_t pts,
+                             vlc_tick_t length)
 {
     filter_sys_t *sys = filter->p_sys;
     struct
@@ -393,12 +520,12 @@ static void HandleUtterances(filter_t *filter, char *text)
         }
         if (vlc_memstream_close(&ms) == 0)
         {
-            var_SetString(vlc_object_instance(filter), GEMMA_TRANSCRIPT_VAR,
-                          ms.ptr);
+            PublishText(filter, ms.ptr, pts, length);
             free(ms.ptr);
         }
     }
 
+    vlc_tick_t voice_pts = pts;
     for (size_t i = 0; i < count; i++)
     {
         unsigned rate;
@@ -413,7 +540,13 @@ static void HandleUtterances(filter_t *filter, char *text)
 
         b = ResampleMono(b, rate, sys->rate);
         if (b != NULL)
+        {
+            WavExport(filter, voice_pts, b);
+            if (voice_pts != VLC_TICK_INVALID)
+                voice_pts += vlc_tick_from_samples(b->i_nb_samples,
+                                                   sys->rate);
             MixEnqueue(filter, b);
+        }
     }
 }
 
@@ -428,6 +561,8 @@ static void *Worker(void *data)
     while ((segment = vlc_queue_DequeueKillable(&sys->queue,
                                                 &sys->dead)) != NULL)
     {
+        const vlc_tick_t pts = segment->i_pts;
+        const vlc_tick_t length = segment->i_length;
         char *text = sys->backend.run(filter, sys->backend.sys,
                                       (const int16_t *)segment->p_buffer,
                                       segment->i_nb_samples);
@@ -437,11 +572,10 @@ static void *Worker(void *data)
         {
             msg_Dbg(filter, "transcript: %s", text);
             if (sys->voiceover)
-                HandleUtterances(filter, text);
+                HandleUtterances(filter, text, pts, length);
             else
                 /* An empty answer means silence: clear the subtitle. */
-                var_SetString(vlc_object_instance(filter),
-                              GEMMA_TRANSCRIPT_VAR, text);
+                PublishText(filter, text, pts, length);
             free(text);
         }
         atomic_fetch_sub(&sys->pending, 1);
@@ -475,6 +609,8 @@ static void QueueSegment(filter_t *filter)
     }
     memcpy(b->p_buffer, sys->buf, sys->fill * sizeof (int16_t));
     b->i_nb_samples = sys->fill;
+    b->i_pts = sys->seg_pts;
+    b->i_length = vlc_tick_from_samples(sys->fill, TRANSCRIBE_RATE);
     sys->fill = 0;
 
     atomic_fetch_add(&sys->pending, 1);
@@ -505,6 +641,11 @@ static block_t *Process(filter_t *filter, block_t *in)
             else if (s < INT16_MIN)
                 s = INT16_MIN;
 
+            if (sys->fill == 0)
+                sys->seg_pts = (in->i_pts != VLC_TICK_INVALID)
+                    ? in->i_pts + vlc_tick_from_samples(i, sys->rate)
+                    : VLC_TICK_INVALID;
+
             sys->buf[sys->fill++] = s;
             if (sys->fill == sys->target)
                 QueueSegment(filter);
@@ -515,7 +656,7 @@ static block_t *Process(filter_t *filter, block_t *in)
         sys->prev = cur;
     }
 
-    if (sys->voiceover)
+    if (sys->voiceover || sys->listen)
         MixVoiceover(filter, in);
 
     return in;
@@ -529,7 +670,7 @@ static void Flush(filter_t *filter)
     sys->pos = 0.;
     sys->prev = 0.f;
 
-    if (sys->voiceover)
+    if (sys->voiceover || sys->listen)
     {   /* Drop the now stale voice-over audio */
         vlc_mutex_lock(&sys->mix_lock);
         block_ChainRelease(sys->mix_first);
@@ -537,7 +678,7 @@ static void Flush(filter_t *filter)
         sys->mix_lastp = &sys->mix_first;
         sys->mix_offset = 0;
         sys->mix_depth = 0;
-        sys->gain = 1.f;
+        sys->gain = sys->idle_gain;
         vlc_mutex_unlock(&sys->mix_lock);
     }
 }
@@ -635,6 +776,22 @@ static int OpenSynthesizer(filter_t *filter, filter_sys_t *sys)
     return ret;
 }
 
+static void CloseExports(filter_sys_t *sys)
+{
+    if (sys->srt != NULL)
+    {
+        fclose(sys->srt);
+        sys->srt = NULL;
+    }
+    if (sys->wav != NULL)
+    {   /* patch the header now that the stream size is known */
+        if (fseek(sys->wav, 0, SEEK_SET) == 0)
+            WavWriteHeader(sys->wav, sys->rate, sys->wav_samples);
+        fclose(sys->wav);
+        sys->wav = NULL;
+    }
+}
+
 static void Close(filter_t *filter)
 {
     filter_sys_t *sys = filter->p_sys;
@@ -646,6 +803,7 @@ static void Close(filter_t *filter)
 
     var_Destroy(vlc_object_instance(filter), GEMMA_TRANSCRIPT_VAR);
 
+    CloseExports(sys);
     if (sys->voiceover)
         sys->tts.close(sys->tts.sys);
     sys->backend.close(sys->backend.sys);
@@ -655,15 +813,51 @@ static void Close(filter_t *filter)
     free(sys);
 }
 
+static void OpenExports(filter_t *filter, filter_sys_t *sys)
+{
+    char *path = var_InheritString(filter, CFG_PREFIX "export-file");
+    if (path != NULL)
+    {
+        sys->srt = vlc_fopen(path, "wt");
+        if (sys->srt == NULL)
+            msg_Err(filter, "cannot export subtitles to %s: %s", path,
+                    vlc_strerror_c(errno));
+        else
+            msg_Dbg(filter, "exporting subtitles to %s", path);
+        free(path);
+    }
+
+    path = var_InheritString(filter, CFG_PREFIX "export-audio");
+    if (path != NULL)
+    {
+        if (!sys->voiceover)
+            msg_Warn(filter, "audio export needs %svoiceover", CFG_PREFIX);
+        else
+        {
+            sys->wav = vlc_fopen(path, "wb");
+            if (sys->wav == NULL)
+                msg_Err(filter, "cannot export voice-over to %s: %s", path,
+                        vlc_strerror_c(errno));
+            else
+            {
+                WavWriteHeader(sys->wav, sys->rate, 0);
+                msg_Dbg(filter, "exporting voice-over to %s", path);
+            }
+        }
+        free(path);
+    }
+}
+
 static int Open(vlc_object_t *obj)
 {
     filter_t *filter = (filter_t *)obj;
 
     static const char *const options[] = {
         "backend", "url", "api-key", "model", "language", "segment-ms",
-        "prompt", "model-path", "mmproj-path", "threads",
-        "voiceover", "tts", "tts-url", "tts-api-key", "tts-model",
-        "voices", "duck", NULL
+        "prompt", "model-path", "mmproj-path", "threads", "download",
+        "model-url", "mmproj-url", "voiceover", "tts", "tts-url",
+        "tts-api-key", "tts-model", "voices", "duck", "listen",
+        "export-file", "export-audio", NULL
     };
     config_ChainParse(filter, CFG_PREFIX, options, filter->p_cfg);
 
@@ -688,6 +882,8 @@ static int Open(vlc_object_t *obj)
     }
 
     sys->voiceover = var_InheritBool(filter, CFG_PREFIX "voiceover");
+    sys->listen = var_InheritBool(filter, CFG_PREFIX "listen");
+    sys->idle_gain = sys->listen ? 0.f : 1.f;
     sys->prompt = BuildPrompt(filter, sys->voiceover);
     if (sys->prompt == NULL)
     {
@@ -717,13 +913,18 @@ static int Open(vlc_object_t *obj)
             sys->backend.close(sys->backend.sys);
             goto error;
         }
+    }
 
+    if (sys->voiceover || sys->listen)
+    {
         float duck = var_InheritFloat(filter, CFG_PREFIX "duck");
         sys->duck = VLC_CLIP(duck, 0.f, 1.f);
-        sys->gain = 1.f;
+        sys->gain = sys->idle_gain;
         vlc_mutex_init(&sys->mix_lock);
         sys->mix_lastp = &sys->mix_first;
     }
+
+    OpenExports(filter, sys);
 
     vlc_queue_Init(&sys->queue, offsetof (block_t, p_next));
     atomic_init(&sys->pending, 0);
@@ -735,6 +936,7 @@ static int Open(vlc_object_t *obj)
     if (vlc_clone(&sys->thread, Worker, filter))
     {
         var_Destroy(vlc_object_instance(filter), GEMMA_TRANSCRIPT_VAR);
+        CloseExports(sys);
         if (sys->voiceover)
             sys->tts.close(sys->tts.sys);
         sys->backend.close(sys->backend.sys);
@@ -748,8 +950,9 @@ static int Open(vlc_object_t *obj)
     };
     filter->ops = &filter_ops;
 
-    msg_Dbg(filter, "transcribing %"PRId64" ms segments%s", segment_ms,
-            sys->voiceover ? " with voice-over" : "");
+    msg_Dbg(filter, "transcribing %"PRId64" ms segments%s%s", segment_ms,
+            sys->voiceover ? " with voice-over" : "",
+            sys->listen ? " (listen mode)" : "");
     return VLC_SUCCESS;
 
 error:
@@ -803,7 +1006,24 @@ error:
 
 #define MODEL_PATH_TEXT N_("Model file")
 #define MODEL_PATH_LONGTEXT N_("GGUF file of the Gemma 4 audio-capable " \
-    "model used by the local backend, e.g. gemma-4-E2B-it-Q4_K_M.gguf.")
+    "model used by the local backend, e.g. gemma-4-E2B-it-Q4_K_M.gguf. " \
+    "When left empty, a model bundled with VLC or previously downloaded " \
+    "is used, or the model is downloaded automatically.")
+
+#define DOWNLOAD_TEXT N_("Download the model automatically")
+#define DOWNLOAD_LONGTEXT N_("When no model file is configured, bundled " \
+    "with VLC or already downloaded, fetch it from the configured URL " \
+    "into the VLC data directory on first use, showing the download " \
+    "progress.")
+
+#define MODEL_URL_TEXT N_("Model download URL")
+#define MODEL_URL_LONGTEXT N_("HTTP(S) URL of the Gemma 4 audio-capable " \
+    "GGUF model to download when it is not present locally.")
+
+#define MMPROJ_URL_TEXT N_("Projector download URL")
+#define MMPROJ_URL_LONGTEXT N_("HTTP(S) URL of the multimodal projector " \
+    "(mmproj) GGUF matching the model, to download when it is not " \
+    "present locally.")
 
 #define MMPROJ_PATH_TEXT N_("Multimodal projector file")
 #define MMPROJ_PATH_LONGTEXT N_("GGUF file of the multimodal projector " \
@@ -869,6 +1089,21 @@ error:
     "voice-over is speaking, between 0.0 (mute the program) and 1.0 " \
     "(no ducking).")
 
+#define LISTEN_TEXT N_("Listen mode (translate other applications)")
+#define LISTEN_LONGTEXT N_("Never output the incoming sound itself, only " \
+    "the subtitles and the synthesized voice-over. Use this with an " \
+    "audio capture input that monitors the system output (for example " \
+    "\"pulse://<sink>.monitor\" on Linux) to translate on the fly " \
+    "whatever another application, such as a web browser, is playing.")
+
+#define EXPORT_FILE_TEXT N_("Export subtitles to file")
+#define EXPORT_FILE_LONGTEXT N_("Write the live transcription as a " \
+    "SubRip (SRT) subtitle file with media timestamps.")
+
+#define EXPORT_AUDIO_TEXT N_("Export voice-over to file")
+#define EXPORT_AUDIO_LONGTEXT N_("Write the synthesized translation " \
+    "track as a timeline-aligned mono WAV file (requires voice-over).")
+
 #define TRANSCRIBE_HELP N_("Transcribe or translate speech into live " \
     "subtitles and voice-over with a Gemma 4 model (use with the " \
     "\"transcript\" sub source)")
@@ -903,6 +1138,8 @@ vlc_module_begin ()
                             SEGMENT_TEXT, SEGMENT_LONGTEXT )
     add_string( CFG_PREFIX "prompt", NULL, PROMPT_TEXT, PROMPT_LONGTEXT )
 
+    add_bool( CFG_PREFIX "listen", false, LISTEN_TEXT, LISTEN_LONGTEXT )
+
     set_section( N_("Local inference"), NULL )
     add_loadfile( CFG_PREFIX "model-path", NULL,
                   MODEL_PATH_TEXT, MODEL_PATH_LONGTEXT )
@@ -910,6 +1147,15 @@ vlc_module_begin ()
                   MMPROJ_PATH_TEXT, MMPROJ_PATH_LONGTEXT )
     add_integer_with_range( CFG_PREFIX "threads", 0, 0, 256,
                             THREADS_TEXT, THREADS_LONGTEXT )
+    add_bool( CFG_PREFIX "download", true, DOWNLOAD_TEXT, DOWNLOAD_LONGTEXT )
+    add_string( CFG_PREFIX "model-url",
+                "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/"
+                "resolve/main/gemma-4-E2B-it-Q4_K_M.gguf",
+                MODEL_URL_TEXT, MODEL_URL_LONGTEXT )
+    add_string( CFG_PREFIX "mmproj-url",
+                "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/"
+                "resolve/main/mmproj-F16.gguf",
+                MMPROJ_URL_TEXT, MMPROJ_URL_LONGTEXT )
 
     set_section( N_("Inference server"), NULL )
     add_string( CFG_PREFIX "url", "http://127.0.0.1:8080/v1/chat/completions",
@@ -933,6 +1179,12 @@ vlc_module_begin ()
                   TTS_KEY_LONGTEXT )
     add_string( CFG_PREFIX "tts-model", "tts-1", TTS_MODEL_TEXT,
                 TTS_MODEL_LONGTEXT )
+
+    set_section( N_("Export"), NULL )
+    add_savefile( CFG_PREFIX "export-file", NULL,
+                  EXPORT_FILE_TEXT, EXPORT_FILE_LONGTEXT )
+    add_savefile( CFG_PREFIX "export-audio", NULL,
+                  EXPORT_AUDIO_TEXT, EXPORT_AUDIO_LONGTEXT )
 
     add_shortcut( "gemma_transcribe", "gemma" )
     set_callback( Open )

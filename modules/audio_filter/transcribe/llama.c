@@ -213,14 +213,22 @@ int transcribe_LocalOpen(filter_t *filter,
                          struct transcribe_backend *backend,
                          const char *prompt)
 {
-    char *model_path = var_InheritString(filter, CFG_PREFIX "model-path");
-    char *mmproj_path = var_InheritString(filter, CFG_PREFIX "mmproj-path");
+    bool download = var_InheritBool(filter, CFG_PREFIX "download");
+    char *model_path = transcribe_LocateModel(filter,
+                                              CFG_PREFIX "model-path",
+                                              CFG_PREFIX "model-url",
+                                              download);
+    char *mmproj_path = (model_path != NULL)
+        ? transcribe_LocateModel(filter, CFG_PREFIX "mmproj-path",
+                                 CFG_PREFIX "mmproj-url", download)
+        : NULL;
 
     if (model_path == NULL || mmproj_path == NULL)
     {
         msg_Err(filter, "the local backend needs a Gemma 4 audio model: "
                 "set %smodel-path and %smmproj-path to the model and "
-                "multimodal projector GGUF files", CFG_PREFIX, CFG_PREFIX);
+                "multimodal projector GGUF files, or enable %sdownload",
+                CFG_PREFIX, CFG_PREFIX, CFG_PREFIX);
         free(model_path);
         free(mmproj_path);
         return VLC_EGENERIC;

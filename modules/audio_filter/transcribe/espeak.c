@@ -22,9 +22,13 @@
 # include "config.h"
 #endif
 
+#include <sys/stat.h>
+
 #include <vlc_common.h>
 #include <vlc_block.h>
+#include <vlc_configuration.h>
 #include <vlc_filter.h>
+#include <vlc_fs.h>
 #include <vlc_iso_lang.h>
 #include <vlc_memstream.h>
 
@@ -187,8 +191,27 @@ int transcribe_EspeakOpen(filter_t *filter, struct tts_backend *backend,
     vlc_mutex_lock(&espeak_lock);
     if (espeak_refs == 0)
     {
-        espeak_rate = espeak_Initialize(AUDIO_OUTPUT_SYNCHRONOUS, 0, NULL,
+        /* Prefer voice data bundled with the VLC installation */
+        char *datadir = config_GetSysPath(VLC_PKG_DATA_DIR,
+                                          "espeak-ng-data");
+        struct stat st;
+        const char *home = (datadir != NULL && vlc_stat(datadir, &st) == 0)
+            ? datadir : NULL;
+
+        if (home != NULL)
+            msg_Dbg(filter, "using espeak-ng data in %s", home);
+
+        /* espeak-ng expects the parent of the espeak-ng-data directory */
+        if (home != NULL)
+        {
+            char *sep = strrchr(datadir, DIR_SEP_CHAR);
+            if (sep != NULL)
+                *sep = '\0';
+        }
+
+        espeak_rate = espeak_Initialize(AUDIO_OUTPUT_SYNCHRONOUS, 0, home,
                                         espeakINITIALIZE_DONT_EXIT);
+        free(datadir);
         if (espeak_rate > 0)
             espeak_SetSynthCallback(SynthCallback);
     }

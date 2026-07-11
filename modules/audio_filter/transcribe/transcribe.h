@@ -79,6 +79,10 @@ int transcribe_TtsServerOpen(filter_t *, struct tts_backend *,
 /* In-process Gemma 4 inference through llama.cpp libmtmd (llama.c) */
 int transcribe_LocalOpen(filter_t *, struct transcribe_backend *,
                          const char *prompt);
+
+/* Model file lookup and download (download.c) */
+char *transcribe_LocateModel(filter_t *, const char *path_option,
+                             const char *url_option, bool download);
 #endif
 
 #ifdef HAVE_ESPEAK_NG

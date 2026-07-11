@@ -74,7 +74,9 @@ libgemma_transcribe_plugin_la_CFLAGS += $(ESPEAK_NG_CFLAGS)
 libgemma_transcribe_plugin_la_LIBADD += $(ESPEAK_NG_LIBS)
 endif
 if HAVE_LLAMACPP_MTMD
-libgemma_transcribe_plugin_la_SOURCES += audio_filter/transcribe/llama.c
+libgemma_transcribe_plugin_la_SOURCES += \
+	audio_filter/transcribe/llama.c \
+	audio_filter/transcribe/download.c
 libgemma_transcribe_plugin_la_CFLAGS += $(LLAMACPP_CFLAGS)
 libgemma_transcribe_plugin_la_LIBADD += $(LLAMACPP_LIBS)
 endif
