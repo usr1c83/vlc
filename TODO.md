@@ -32,11 +32,12 @@
       перевод (озвучку + субтитры), оригинал не дублирует. Пример:
       `vlc pulse://<sink>.monitor --audio-filter=gemma_transcribe
        --gemma-transcribe-listen --gemma-transcribe-voiceover`.
-- [ ] GitHub Actions: автосборка релизов (workflow добавлен, идёт отладка
-      итерациями по CI; тестовые теги vX.Y.Z-test.N). Готовые бинарники Windows и
-      Linux, с уже вшитыми весами модели (E2B Q4_K_M + mmproj в
-      каталоге данных VLC), архив разбит на части < 2 ГБ. Цель: после
-      распаковки сразу рабочий VLC с переводом налету.
+- [x] GitHub Actions: автосборка релизов — ГОТОВО. Первый релиз:
+      https://github.com/usr1c83/vlc/releases/tag/dev-7 (Linux tar.zst
+      2 части, Windows 7z 2 тома, все < 2 ГиБ, веса E2B Q4_K_M + mmproj
+      вшиты, SHA256SUMS). Запуск: тег vX.Y.Z (полный релиз) или вручную
+      workflow_dispatch (prerelease dev-N). PR-прогоны собирают с
+      весами-заглушками для быстрой отладки.
 
 ## Отложено / заметки
 
