@@ -32,7 +32,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 350
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install build dependencies
         run: |
@@ -169,7 +169,7 @@ jobs:
           #   tar --zstd -xf vlc-gemma-linux-x86_64.tar.zst
           EOF
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: linux-x86_64
           path: |
@@ -186,7 +186,7 @@ jobs:
     env:
       TRIPLET: x86_64-w64-mingw32
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Build llama.cpp for Windows
         run: |
@@ -270,7 +270,7 @@ jobs:
           sha256sum vlc-gemma-win64.7z.* > SHA256SUMS-win64.txt
           echo "# Open vlc-gemma-win64.7z.001 with 7-Zip: the parts join automatically." >> SHA256SUMS-win64.txt
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: win64
           path: |
@@ -285,29 +285,36 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v6
         with:
           path: assets
           merge-multiple: true
 
       - name: Publish release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('dev-{0}', github.run_number) }}
-          prerelease: ${{ github.ref_type != 'tag' }}
-          fail_on_unmatched_files: true
-          body: |
-            VLC with Gemma 4 live speech translation — ready to run, model
-            weights included.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG="${{ github.ref_name }}"
+            PRERELEASE=""
+          else
+            TAG="dev-${{ github.run_number }}"
+            PRERELEASE="--prerelease"
+          fi
+          cat > notes.md << 'EOF'
+          VLC with Gemma 4 live speech translation — ready to run, model
+          weights included.
 
-            **Linux**: join the parts, unpack, run `./vlc-gemma/vlc.sh`
-            ```
-            cat vlc-gemma-linux-x86_64.tar.zst.part* > vlc-gemma-linux-x86_64.tar.zst
-            tar --zstd -xf vlc-gemma-linux-x86_64.tar.zst
-            ```
-            **Windows**: open `vlc-gemma-win64.7z.001` with 7-Zip (parts join
-            automatically), unpack and run `vlc.exe`.
+          **Linux**: join the parts, unpack, run `./vlc-gemma/vlc.sh`
+          ```
+          cat vlc-gemma-linux-x86_64.tar.zst.part* > vlc-gemma-linux-x86_64.tar.zst
+          tar --zstd -xf vlc-gemma-linux-x86_64.tar.zst
+          ```
+          **Windows**: open `vlc-gemma-win64.7z.001` with 7-Zip (parts join
+          automatically), unpack and run `vlc.exe`.
 
-            See README-TRANSLATE.txt inside the archives for usage examples.
-          files: |
-            assets/**
+          See README-TRANSLATE.txt inside the archives for usage examples.
+          EOF
+          gh release create "$TAG" $PRERELEASE --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" --title "$TAG" --notes-file notes.md \
+            $(find assets -type f | sort)
