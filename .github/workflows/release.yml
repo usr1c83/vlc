@@ -209,18 +209,25 @@ jobs:
           git config --global --add safe.directory '*'
           git clone --depth 1 --branch "$LLAMA_TAG" \
             https://github.com/ggml-org/llama.cpp.git llama.cpp
+          # VLC links Windows plugins statically, so build static libraries
           cmake -S llama.cpp -B llama.cpp/build \
             -DCMAKE_SYSTEM_NAME=Windows \
             -DCMAKE_C_COMPILER=$TRIPLET-gcc \
             -DCMAKE_CXX_COMPILER=$TRIPLET-g++ \
             -DCMAKE_RC_COMPILER=$TRIPLET-windres \
-            -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+            -DGGML_OPENMP=OFF \
             -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
             -DLLAMA_BUILD_SERVER=OFF -DLLAMA_BUILD_APP=OFF \
             -DLLAMA_CURL=OFF -DGGML_NATIVE=OFF \
             -DCMAKE_INSTALL_PREFIX="$PWD/contrib/$TRIPLET"
           cmake --build llama.cpp/build -j"$(nproc)"
           cmake --install llama.cpp/build
+          # The static link needs the whole dependency closure, with mtmd
+          # in front of the libraries it depends on
+          sed -i 's|^Libs:.*|Libs: -L${libdir} -lmtmd -lllama -lggml -lggml-cpu -lggml-base -lstdc++ -lwinpthread|' \
+            "contrib/$TRIPLET/lib/pkgconfig/llama.pc"
+          cat "contrib/$TRIPLET/lib/pkgconfig/llama.pc"
 
       - name: Build espeak-ng for Windows
         run: |
@@ -302,7 +309,10 @@ jobs:
           compression-level: 0
 
   release:
-    if: github.event_name != 'pull_request'
+    # Publish whatever platforms succeeded, so a broken platform does not
+    # hold back the others
+    if: ${{ github.event_name != 'pull_request' && !cancelled() &&
+            (needs.linux.result == 'success' || needs.windows.result == 'success') }}
     needs: [linux, windows]
     runs-on: ubuntu-24.04
     permissions:
