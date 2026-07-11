@@ -44,7 +44,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential autoconf automake libtool pkg-config flex bison \
             gettext autopoint cmake ninja-build git ca-certificates curl \
-            zstd p7zip-full liblua5.2-dev lua5.2 wget \
+            zstd p7zip-full liblua5.2-dev lua5.2 wget aria2 \
             qt6-base-dev qt6-base-private-dev qt6-declarative-dev \
             qt6-declarative-private-dev qt6-declarative-dev-tools \
             qt6-svg-dev qt6-wayland qml6-module-* \
@@ -119,8 +119,14 @@ jobs:
             head -c 8388608 /dev/zero > "$B/share/vlc/gemma/$(basename "$MODEL_URL")"
             head -c 1048576 /dev/zero > "$B/share/vlc/gemma/$(basename "$MMPROJ_URL")"
           else
-            curl -fsSL "$MODEL_URL" -o "$B/share/vlc/gemma/$(basename "$MODEL_URL")"
-            curl -fsSL "$MMPROJ_URL" -o "$B/share/vlc/gemma/$(basename "$MMPROJ_URL")"
+          fetch() {
+            aria2c -c -x 8 -s 8 --max-tries=10 --retry-wait=15 \
+              --file-allocation=none --console-log-level=warn \
+              --summary-interval=60 -d "$(dirname "$2")" \
+              -o "$(basename "$2")" "$1"
+          }
+            fetch "$MODEL_URL" "$B/share/vlc/gemma/$(basename "$MODEL_URL")"
+            fetch "$MMPROJ_URL" "$B/share/vlc/gemma/$(basename "$MMPROJ_URL")"
           fi
 
           # Launcher
@@ -257,8 +263,15 @@ jobs:
             head -c 8388608 /dev/zero > "$B/gemma/$(basename "$MODEL_URL")"
             head -c 1048576 /dev/zero > "$B/gemma/$(basename "$MMPROJ_URL")"
           else
-            curl -fsSL "$MODEL_URL" -o "$B/gemma/$(basename "$MODEL_URL")"
-            curl -fsSL "$MMPROJ_URL" -o "$B/gemma/$(basename "$MMPROJ_URL")"
+            apt-get install -y aria2 || (apt-get update && apt-get install -y aria2)
+          fetch() {
+            aria2c -c -x 8 -s 8 --max-tries=10 --retry-wait=15 \
+              --file-allocation=none --console-log-level=warn \
+              --summary-interval=60 -d "$(dirname "$2")" \
+              -o "$(basename "$2")" "$1"
+          }
+            fetch "$MODEL_URL" "$B/gemma/$(basename "$MODEL_URL")"
+            fetch "$MMPROJ_URL" "$B/gemma/$(basename "$MMPROJ_URL")"
           fi
           cat > "$B/README-TRANSLATE.txt" << 'EOF'
           VLC with Gemma 4 live translation (Windows x86_64)
