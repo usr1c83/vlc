@@ -36,7 +36,11 @@ jobs:
 
       - name: Install build dependencies
         run: |
+          # Pull the full build-dependency set of the distro VLC package,
+          # which covers most of what a desktop VLC build needs
+          sudo sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources
           sudo apt-get update
+          sudo apt-get build-dep -y vlc
           sudo apt-get install -y --no-install-recommends \
             build-essential autoconf automake libtool pkg-config flex bison \
             gettext autopoint cmake ninja-build git ca-certificates curl \
@@ -47,7 +51,9 @@ jobs:
             libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
             libasound2-dev libpulse-dev libx11-dev libxcb1-dev \
             libxcb-shm0-dev libxcb-composite0-dev libxcb-xkb-dev \
-            libxkbcommon-dev libxkbcommon-x11-dev \
+            libxcb-randr0-dev libxcb-render0-dev libxcb-render-util0-dev \
+            libxcb-keysyms1-dev libxcb-cursor-dev libxcb-xfixes0-dev \
+            libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev \
             libfreetype-dev libfontconfig-dev libfribidi-dev libharfbuzz-dev \
             libgl-dev libegl-dev libgles-dev libdrm-dev \
             libmpg123-dev libmad0-dev libvorbis-dev libogg-dev libopus-dev \
