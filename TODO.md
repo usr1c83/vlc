@@ -18,21 +18,22 @@
 
 ## В работе
 
-- [ ] Автозагрузка весов модели с Hugging Face из GUI: поиск весов
+- [x] Автозагрузка весов модели с Hugging Face из GUI: поиск весов
       (опция → комплект поставки → каталог пользователя → скачивание
       с прогресс-диалогом). Файл: `modules/audio_filter/transcribe/download.c`.
       Модель по умолчанию: `unsloth/gemma-4-E2B-it-GGUF` (Q4_K_M, ~3.1 ГБ)
       + `mmproj-F16.gguf`.
-- [ ] Экспорт субтитров в SRT: `--gemma-transcribe-export-file` (таймкоды
+- [x] Экспорт субтитров в SRT: `--gemma-transcribe-export-file` (таймкоды
       по PTS сегментов).
-- [ ] Экспорт аудиоперевода в WAV: `--gemma-transcribe-export-audio`
+- [x] Экспорт аудиоперевода в WAV: `--gemma-transcribe-export-audio`
       (дорожка озвучки, выровненная по таймлайну).
-- [ ] Режим прослушивания системного звука: `--gemma-transcribe-listen` —
+- [x] Режим прослушивания системного звука: `--gemma-transcribe-listen` —
       VLC слушает монитор аудиовыхода (pulse/wasapi), выводит только
       перевод (озвучку + субтитры), оригинал не дублирует. Пример:
       `vlc pulse://<sink>.monitor --audio-filter=gemma_transcribe
        --gemma-transcribe-listen --gemma-transcribe-voiceover`.
-- [ ] GitHub Actions: автосборка релизов. Готовые бинарники Windows и
+- [ ] GitHub Actions: автосборка релизов (workflow добавлен, идёт отладка
+      итерациями по CI; тестовые теги vX.Y.Z-test.N). Готовые бинарники Windows и
       Linux, с уже вшитыми весами модели (E2B Q4_K_M + mmproj в
       каталоге данных VLC), архив разбит на части < 2 ГБ. Цель: после
       распаковки сразу рабочий VLC с переводом налету.

@@ -1,0 +1,294 @@
+# Builds ready-to-run VLC packages with Gemma 4 live translation baked in:
+# the binaries, the llama.cpp/espeak-ng runtimes and the Gemma model weights
+# are all bundled, so the user only unpacks the archive and starts vlc.
+# Archives are split into parts below the 2 GiB GitHub release asset limit.
+#
+# Triggered by version tags (v*) or manually (workflow_dispatch publishes a
+# prerelease named dev-<run number>).
+
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  LLAMA_TAG: b9957
+  MODEL_URL: https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf
+  MMPROJ_URL: https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/mmproj-F16.gguf
+  SPLIT_SIZE: 1900M
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential autoconf automake libtool pkg-config flex bison \
+            gettext autopoint cmake ninja-build git ca-certificates curl \
+            zstd p7zip-full \
+            qt6-base-dev qt6-base-private-dev qt6-declarative-dev \
+            qt6-declarative-private-dev qt6-svg-dev qt6-wayland qml6-module-* \
+            libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
+            libasound2-dev libpulse-dev libx11-dev libxcb1-dev \
+            libxcb-shm0-dev libxcb-composite0-dev libxcb-xkb-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev \
+            libfreetype-dev libfontconfig-dev libfribidi-dev libharfbuzz-dev \
+            libgl-dev libegl-dev libgles-dev libdrm-dev \
+            libmpg123-dev libmad0-dev libvorbis-dev libogg-dev libopus-dev \
+            libflac-dev libmatroska-dev libebml-dev libdvbpsi-dev \
+            liba52-0.7.4-dev libgcrypt20-dev libgnutls28-dev \
+            libarchive-dev libxml2-dev libsecret-1-dev \
+            libespeak-ng-dev espeak-ng-data libespeak-ng1
+
+      - name: Build llama.cpp (libllama + libmtmd)
+        run: |
+          git clone --depth 1 --branch "$LLAMA_TAG" \
+            https://github.com/ggml-org/llama.cpp.git llama.cpp
+          cmake -S llama.cpp -B llama.cpp/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
+            -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
+            -DLLAMA_BUILD_SERVER=OFF -DLLAMA_BUILD_APP=OFF \
+            -DLLAMA_CURL=OFF -DGGML_NATIVE=OFF \
+            -DCMAKE_INSTALL_PREFIX=/usr/local
+          ninja -C llama.cpp/build
+          sudo ninja -C llama.cpp/build install
+          sudo ldconfig
+
+      - name: Build VLC
+        run: |
+          ./bootstrap
+          mkdir build && cd build
+          PKG_CONFIG_PATH=/usr/local/lib/pkgconfig ../configure \
+            --prefix=/opt/vlc-gemma --disable-nls \
+            --enable-qt --enable-avcodec --enable-alsa --enable-pulse \
+            --enable-espeak-ng --enable-llamacpp
+          make -j"$(nproc)"
+          sudo make install
+
+      - name: Assemble portable bundle
+        run: |
+          B=bundle/vlc-gemma
+          mkdir -p "$B"
+          cp -a /opt/vlc-gemma/* "$B/"
+
+          # Bundle every non-glibc shared library dependency
+          mkdir -p "$B/lib"
+          collect() {
+            ldd "$1" 2>/dev/null | awk '/=> \//{print $3}'
+          }
+          { collect "$B/bin/vlc"
+            find "$B/lib/vlc" -name '*.so' | while read -r so; do collect "$so"; done
+          } | sort -u | grep -vE '/lib(c|m|dl|rt|pthread|resolv|nsl)\.so|ld-linux' \
+            | while read -r lib; do cp -Ln "$lib" "$B/lib/" || true; done
+
+          # Qt runtime (plugins + QML modules)
+          QTDIR=/usr/lib/x86_64-linux-gnu/qt6
+          mkdir -p "$B/qt6"
+          cp -a "$QTDIR/plugins" "$B/qt6/plugins"
+          cp -a "$QTDIR/qml" "$B/qt6/qml"
+
+          # espeak-ng voice data
+          cp -a /usr/lib/x86_64-linux-gnu/espeak-ng-data "$B/share/vlc/espeak-ng-data"
+
+          # Gemma model weights (baked into the package)
+          mkdir -p "$B/share/vlc/gemma"
+          curl -fsSL "$MODEL_URL" -o "$B/share/vlc/gemma/$(basename "$MODEL_URL")"
+          curl -fsSL "$MMPROJ_URL" -o "$B/share/vlc/gemma/$(basename "$MMPROJ_URL")"
+
+          # Launcher
+          cat > "$B/vlc.sh" << 'EOF'
+          #!/bin/sh
+          HERE="$(dirname "$(readlink -f "$0")")"
+          export LD_LIBRARY_PATH="$HERE/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          export VLC_PLUGIN_PATH="$HERE/lib/vlc/plugins"
+          export VLC_LIB_PATH="$HERE/lib/vlc"
+          export VLC_DATA_PATH="$HERE/share/vlc"
+          export QT_PLUGIN_PATH="$HERE/qt6/plugins"
+          export QML_IMPORT_PATH="$HERE/qt6/qml"
+          export QML2_IMPORT_PATH="$HERE/qt6/qml"
+          exec "$HERE/bin/vlc" "$@"
+          EOF
+          chmod +x "$B/vlc.sh"
+
+          cat > "$B/README-TRANSLATE.txt" << 'EOF'
+          VLC with Gemma 4 live translation (Linux x86_64, Ubuntu 24.04+ ABI)
+          ===================================================================
+          Run:            ./vlc.sh video.mkv
+          Live subtitles: enable in Preferences (All) > Audio > Filters >
+                          "Gemma 4 live speech transcription", and
+                          Video > Subtitles/OSD > "Transcript", or run:
+            ./vlc.sh --audio-filter=gemma_transcribe --sub-source=transcript \
+                     --gemma-transcribe-language=Russian \
+                     --gemma-transcribe-voiceover video.mkv
+          Translate another app's sound (browser etc.):
+            ./vlc.sh "pulse://$(pactl get-default-sink).monitor" \
+                     --audio-filter=gemma_transcribe \
+                     --gemma-transcribe-listen --gemma-transcribe-voiceover \
+                     --gemma-transcribe-language=Russian
+          The Gemma model weights are bundled in share/vlc/gemma.
+          EOF
+
+      - name: Smoke test the bundle
+        run: |
+          bundle/vlc-gemma/vlc.sh --version
+          bundle/vlc-gemma/vlc.sh -I dummy --list | grep -E "gemma_transcribe|transcript"
+
+      - name: Archive and split
+        run: |
+          cd bundle
+          tar -I 'zstd -T0 -8' -cf vlc-gemma-linux-x86_64.tar.zst vlc-gemma
+          split -b "$SPLIT_SIZE" -d vlc-gemma-linux-x86_64.tar.zst \
+                vlc-gemma-linux-x86_64.tar.zst.part
+          rm vlc-gemma-linux-x86_64.tar.zst
+          sha256sum vlc-gemma-linux-x86_64.tar.zst.part* > SHA256SUMS-linux.txt
+          cat >> SHA256SUMS-linux.txt << 'EOF'
+          # Join the parts before unpacking:
+          #   cat vlc-gemma-linux-x86_64.tar.zst.part* > vlc-gemma-linux-x86_64.tar.zst
+          #   tar --zstd -xf vlc-gemma-linux-x86_64.tar.zst
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64
+          path: |
+            bundle/vlc-gemma-linux-x86_64.tar.zst.part*
+            bundle/SHA256SUMS-linux.txt
+          compression-level: 0
+
+  windows:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    container:
+      image: registry.videolan.org/vlc-debian-win64-posix:20260611225331
+    env:
+      TRIPLET: x86_64-w64-mingw32
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build llama.cpp for Windows
+        run: |
+          git config --global --add safe.directory '*'
+          git clone --depth 1 --branch "$LLAMA_TAG" \
+            https://github.com/ggml-org/llama.cpp.git llama.cpp
+          cmake -S llama.cpp -B llama.cpp/build \
+            -DCMAKE_SYSTEM_NAME=Windows \
+            -DCMAKE_C_COMPILER=$TRIPLET-gcc \
+            -DCMAKE_CXX_COMPILER=$TRIPLET-g++ \
+            -DCMAKE_RC_COMPILER=$TRIPLET-windres \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
+            -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
+            -DLLAMA_BUILD_SERVER=OFF -DLLAMA_BUILD_APP=OFF \
+            -DLLAMA_CURL=OFF -DGGML_NATIVE=OFF \
+            -DCMAKE_INSTALL_PREFIX="$PWD/contrib/$TRIPLET"
+          cmake --build llama.cpp/build -j"$(nproc)"
+          cmake --install llama.cpp/build
+
+      - name: Build espeak-ng for Windows
+        run: |
+          # Native espeak-ng data files come from the Debian package
+          apt-get update && apt-get install -y espeak-ng-data libtool autoconf automake curl ca-certificates
+          git clone --depth 1 --branch 1.52.0 \
+            https://github.com/espeak-ng/espeak-ng.git espeak-ng
+          cd espeak-ng
+          ./autogen.sh
+          ./configure --host=$TRIPLET --prefix="$GITHUB_WORKSPACE/contrib/$TRIPLET" \
+            --without-pcaudiolib --without-klatt --without-speechplayer \
+            --without-mbrola --without-sonic --without-async
+          # Only the library is cross-compiled; voice data is taken from Debian
+          make -C src -j"$(nproc)" libespeak-ng.la || make -j"$(nproc)" || true
+          make install || make -C src install-libLTLIBRARIES install-includeHEADERS || true
+          ls "$GITHUB_WORKSPACE/contrib/$TRIPLET/lib/pkgconfig/" || true
+
+      - name: Build VLC for Windows (prebuilt contribs)
+        run: |
+          extras/package/win32/build.sh -a x86_64 -p -o "$PWD/win-install"
+
+      - name: Assemble portable package
+        run: |
+          B=pkg/vlc-gemma
+          mkdir -p pkg
+          # package-win-common produced an installed tree in win-install
+          cp -a win-install "$B" 2>/dev/null || {
+            # fall back to the vlc-<version> dir produced by package targets
+            D=$(find win64 -maxdepth 1 -type d -name 'vlc-*' | head -1)
+            cp -a "$D" "$B"
+          }
+          # llama.cpp / espeak runtime DLLs
+          cp contrib/$TRIPLET/bin/*.dll "$B/" 2>/dev/null || true
+          find contrib/$TRIPLET -name 'libllama*.dll' -o -name 'libmtmd*.dll' \
+               -o -name 'libggml*.dll' -o -name 'libespeak-ng*.dll' | \
+               while read -r dll; do cp -n "$dll" "$B/"; done
+          # espeak voice data next to the data dir used by the plugin
+          cp -a /usr/lib/*/espeak-ng-data "$B/espeak-ng-data" 2>/dev/null || \
+            cp -a /usr/share/espeak-ng-data "$B/espeak-ng-data"
+          # Gemma model weights (baked into the package)
+          mkdir -p "$B/gemma"
+          curl -fsSL "$MODEL_URL" -o "$B/gemma/$(basename "$MODEL_URL")"
+          curl -fsSL "$MMPROJ_URL" -o "$B/gemma/$(basename "$MMPROJ_URL")"
+          cat > "$B/README-TRANSLATE.txt" << 'EOF'
+          VLC with Gemma 4 live translation (Windows x86_64)
+          ==================================================
+          Run vlc.exe. Enable in Preferences (All) > Audio > Filters >
+          "Gemma 4 live speech transcription" and Video > Subtitles/OSD >
+          "Transcript". The Gemma model weights are bundled in gemma\.
+          EOF
+
+      - name: Archive and split (7z volumes)
+        run: |
+          apt-get install -y p7zip-full curl || (apt-get update && apt-get install -y p7zip-full curl)
+          cd pkg
+          7z a -mx=5 -v$SPLIT_SIZE vlc-gemma-win64.7z vlc-gemma
+          sha256sum vlc-gemma-win64.7z.* > SHA256SUMS-win64.txt
+          echo "# Open vlc-gemma-win64.7z.001 with 7-Zip: the parts join automatically." >> SHA256SUMS-win64.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: win64
+          path: |
+            pkg/vlc-gemma-win64.7z.*
+            pkg/SHA256SUMS-win64.txt
+          compression-level: 0
+
+  release:
+    needs: [linux, windows]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('dev-{0}', github.run_number) }}
+          prerelease: ${{ github.ref_type != 'tag' }}
+          fail_on_unmatched_files: true
+          body: |
+            VLC with Gemma 4 live speech translation — ready to run, model
+            weights included.
+
+            **Linux**: join the parts, unpack, run `./vlc-gemma/vlc.sh`
+            ```
+            cat vlc-gemma-linux-x86_64.tar.zst.part* > vlc-gemma-linux-x86_64.tar.zst
+            tar --zstd -xf vlc-gemma-linux-x86_64.tar.zst
+            ```
+            **Windows**: open `vlc-gemma-win64.7z.001` with 7-Zip (parts join
+            automatically), unpack and run `vlc.exe`.
+
+            See README-TRANSLATE.txt inside the archives for usage examples.
+          files: |
+            assets/**
