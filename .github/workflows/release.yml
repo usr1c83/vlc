@@ -181,6 +181,7 @@ jobs:
     timeout-minutes: 350
     container:
       image: registry.videolan.org/vlc-debian-win64-posix:20260611225331
+      options: --user root
     env:
       TRIPLET: x86_64-w64-mingw32
     steps:
