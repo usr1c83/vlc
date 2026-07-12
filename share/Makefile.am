@@ -4,6 +4,7 @@ EXTRA_DIST =
 
 LUA_MODULES = \
 	lua/extensions/VLSub.lua \
+	lua/extensions/gemma_translate.lua \
 	lua/intf/cli.lua \
 	lua/intf/dummy.lua \
 	lua/intf/dumpmeta.lua \
