@@ -225,10 +225,12 @@ int transcribe_LocalOpen(filter_t *filter,
 
     if (model_path == NULL || mmproj_path == NULL)
     {
-        msg_Err(filter, "the local backend needs a Gemma 4 audio model: "
-                "set %smodel-path and %smmproj-path to the model and "
-                "multimodal projector GGUF files, or enable %sdownload",
-                CFG_PREFIX, CFG_PREFIX, CFG_PREFIX);
+        msg_Err(filter, "no Gemma 4 model available. The model is normally "
+                "downloaded automatically on first use, or bundled with the "
+                "installer. To use a model you already have, set "
+                "%smodel-path and %smmproj-path to its GGUF files. To let "
+                "VLC fetch it, enable %sdownload and check your network "
+                "connection.", CFG_PREFIX, CFG_PREFIX, CFG_PREFIX);
         free(model_path);
         free(mmproj_path);
         return VLC_EGENERIC;

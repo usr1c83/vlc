@@ -217,7 +217,9 @@ Audio filter:
    OpenAI-compatible text-to-speech server. The model can be downloaded
    automatically. Supports exporting the transcription as SRT subtitles
    and the voice-over as a WAV dubbing track, and a listen mode that
-   translates the system audio captured from another application
+   translates the system audio captured from another application. A "Live
+   Translation" menu extension turns it on for the current video in one
+   click, with no server to set up
  * Add noise gate, dynamic range expander and peak limiter filters
  * Add stereo pan and center channel upmixing filters
  * Add EBU R 128 audio meter plugin

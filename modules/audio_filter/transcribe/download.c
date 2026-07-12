@@ -124,6 +124,7 @@ static char *Fetch(filter_t *filter, const char *url, const char *dir,
                                            "transcription model %s…"), name);
 
     uint64_t total = 0, logged = done;
+    bool opened = false;
 
     for (unsigned attempt = 1; attempt <= DOWNLOAD_TRIES; attempt++)
     {
@@ -142,7 +143,19 @@ static char *Fetch(filter_t *filter, const char *url, const char *dir,
 
         stream_t *stream = vlc_stream_NewURL(filter, url);
         if (stream == NULL)
+        {
+            /* If the connection could never even be opened, retrying the
+             * same URL is pointless: this is an environment problem (no
+             * network, or a build without TLS), not a transient drop. */
+            if (!opened)
+            {
+                msg_Err(filter, "cannot open %s: no network access or "
+                        "unsupported URL", url);
+                goto error;
+            }
             continue;
+        }
+        opened = true;
 
         uint64_t size;
         if (vlc_stream_GetSize(stream, &size) == 0 && size > 0)

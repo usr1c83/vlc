@@ -151,19 +151,30 @@ jobs:
           cat > "$B/README-TRANSLATE.txt" << 'EOF'
           VLC with Gemma 4 live translation (Linux x86_64, Ubuntu 24.04+ ABI)
           ===================================================================
-          Run:            ./vlc.sh video.mkv
-          Live subtitles: enable in Preferences (All) > Audio > Filters >
-                          "Gemma 4 live speech transcription", and
-                          Video > Subtitles/OSD > "Transcript", or run:
+          Everything runs on your computer. No account, no server, no ports
+          to open — the Gemma 4 model is bundled in share/vlc/gemma.
+
+          Easiest way (menu):
+            1. Start VLC:   ./vlc.sh
+            2. Open your video.
+            3. Menu  View > Live Translation (Gemma 4).
+            4. Pick a language, tick Subtitles and/or Voice-over, press
+               Translate. The first line appears after a few seconds.
+
+          Command line, if you prefer:
             ./vlc.sh --audio-filter=gemma_transcribe --sub-source=transcript \
                      --gemma-transcribe-language=Russian \
                      --gemma-transcribe-voiceover video.mkv
-          Translate another app's sound (browser etc.):
+
+          Translate another app's sound (a browser, a call...):
             ./vlc.sh "pulse://$(pactl get-default-sink).monitor" \
                      --audio-filter=gemma_transcribe \
                      --gemma-transcribe-listen --gemma-transcribe-voiceover \
                      --gemma-transcribe-language=Russian
-          The Gemma model weights are bundled in share/vlc/gemma.
+
+          The "Inference server" fields in the advanced preferences are only
+          for people who want to point VLC at their own AI server; you do not
+          need them.
           EOF
 
       - name: Smoke test the bundle
@@ -287,9 +298,17 @@ jobs:
           cat > "$B/README-TRANSLATE.txt" << 'EOF'
           VLC with Gemma 4 live translation (Windows x86_64)
           ==================================================
-          Run vlc.exe. Enable in Preferences (All) > Audio > Filters >
-          "Gemma 4 live speech transcription" and Video > Subtitles/OSD >
-          "Transcript". The Gemma model weights are bundled in gemma\.
+          Everything runs on your computer. No account, no server, no ports
+          to open — the Gemma 4 model is bundled in the gemma\ folder.
+
+          1. Run vlc.exe and open your video.
+          2. Menu  View > Live Translation (Gemma 4).
+          3. Pick a language, tick Subtitles and/or Voice-over, press
+             Translate. The first line appears after a few seconds.
+
+          The "Inference server" fields in the advanced preferences are only
+          for people who want to point VLC at their own AI server; you do not
+          need them.
           EOF
 
       - name: Archive and split (7z volumes)
