@@ -66,17 +66,35 @@ jobs:
             libarchive-dev libxml2-dev libsecret-1-dev \
             libespeak-ng-dev espeak-ng-data libespeak-ng1
 
-      - name: Build llama.cpp (libllama + libmtmd)
+      - name: Build llama.cpp (libllama + libmtmd, Vulkan GPU)
         run: |
+          # Vulkan build tools: dev headers/loader for linking and glslc to
+          # compile the compute shaders. The Vulkan loader (libvulkan1) is
+          # bundled with the package later, so the GPU backend loads even on
+          # machines that do not ship one; when there is no GPU driver the
+          # loader simply reports no device and processing stays on the CPU.
+          sudo apt-get install -y libvulkan-dev libvulkan1 glslc glslang-tools \
+            || sudo apt-get install -y libvulkan-dev libvulkan1 glslang-tools
           git clone --depth 1 --branch "$LLAMA_TAG" \
             https://github.com/ggml-org/llama.cpp.git llama.cpp
-          cmake -S llama.cpp -B llama.cpp/build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
-            -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
-            -DLLAMA_BUILD_SERVER=OFF -DLLAMA_BUILD_APP=OFF \
-            -DLLAMA_CURL=OFF -DGGML_NATIVE=OFF \
-            -DCMAKE_INSTALL_PREFIX=/usr/local
-          ninja -C llama.cpp/build
+
+          build() {
+            rm -rf llama.cpp/build
+            cmake -S llama.cpp -B llama.cpp/build -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
+              -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
+              -DLLAMA_BUILD_SERVER=OFF -DLLAMA_BUILD_APP=OFF \
+              -DLLAMA_CURL=OFF -DGGML_NATIVE=OFF "$@" \
+              -DCMAKE_INSTALL_PREFIX=/usr/local || return 1
+            ninja -C llama.cpp/build || return 1
+          }
+
+          if build -DGGML_VULKAN=ON; then
+            echo "llama.cpp built with Vulkan GPU support"
+          else
+            echo "Vulkan build failed, falling back to CPU-only llama.cpp"
+            build
+          fi
           sudo ninja -C llama.cpp/build install
           sudo ldconfig
 
@@ -106,6 +124,17 @@ jobs:
             find "$B/lib/vlc" -name '*.so' | while read -r so; do collect "$so"; done
           } | sort -u | grep -vE '/lib(c|m|dl|rt|pthread|resolv|nsl)\.so|ld-linux' \
             | while read -r lib; do cp -Ln "$lib" "$B/lib/" || true; done
+
+          # Explicitly bundle the llama.cpp / ggml runtime and the Vulkan GPU
+          # backend + loader. ggml may load a backend that is not a direct
+          # NEEDED of the plugin, and the Vulkan loader lets the GPU backend
+          # initialise (or cleanly report no device and fall back to CPU) on
+          # machines that do not ship libvulkan.
+          for lib in /usr/local/lib/libggml*.so* /usr/local/lib/libllama*.so* \
+                     /usr/local/lib/libmtmd*.so* \
+                     /usr/lib/x86_64-linux-gnu/libvulkan.so*; do
+            [ -e "$lib" ] && cp -Ln "$lib" "$B/lib/" || true
+          done
 
           # Qt runtime (plugins + QML modules)
           QTDIR=/usr/lib/x86_64-linux-gnu/qt6
@@ -154,12 +183,18 @@ jobs:
           Everything runs on your computer. No account, no server, no ports
           to open — the Gemma 4 model is bundled in share/vlc/gemma.
 
+          Your GPU is used automatically when a Vulkan-capable one is present
+          (much faster, keeps subtitles and voice-over in real time). Without
+          a GPU it runs on the CPU — on a slow computer expect the subtitles
+          to lag and only cover part of the speech.
+
           Easiest way (menu):
             1. Start VLC:   ./vlc.sh
             2. Open your video.
             3. Menu  View > Live Translation (Gemma 4).
-            4. Pick a language, tick Subtitles and/or Voice-over, press
-               Translate. The first line appears after a few seconds.
+            4. Pick a language, tick Subtitles and/or Voice-over, keep "Use
+               the GPU" ticked, press Translate. The first line appears
+               after a few seconds.
 
           Command line, if you prefer:
             ./vlc.sh --audio-filter=gemma_transcribe --sub-source=transcript \
@@ -215,30 +250,89 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Build llama.cpp for Windows
+      - name: Build llama.cpp for Windows (Vulkan GPU, CPU fallback)
         run: |
           git config --global --add safe.directory '*'
           git clone --depth 1 --branch "$LLAMA_TAG" \
             https://github.com/ggml-org/llama.cpp.git llama.cpp
-          # VLC links Windows plugins statically, so build static libraries
-          cmake -S llama.cpp -B llama.cpp/build \
-            -DCMAKE_SYSTEM_NAME=Windows \
-            -DCMAKE_C_COMPILER=$TRIPLET-gcc \
-            -DCMAKE_CXX_COMPILER=$TRIPLET-g++ \
-            -DCMAKE_RC_COMPILER=$TRIPLET-windres \
-            -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
-            -DGGML_OPENMP=OFF \
-            -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
-            -DLLAMA_BUILD_SERVER=OFF -DLLAMA_BUILD_APP=OFF \
-            -DLLAMA_CURL=OFF -DGGML_NATIVE=OFF \
-            -DCMAKE_INSTALL_PREFIX="$PWD/contrib/$TRIPLET"
-          cmake --build llama.cpp/build -j"$(nproc)"
-          cmake --install llama.cpp/build
-          # The static link needs the whole dependency closure, with mtmd
-          # in front of the libraries it depends on
-          sed -i 's|^Libs:.*|Libs: -L${libdir} -lmtmd -lllama -lggml -lggml-cpu -lggml-base -lstdc++ -lwinpthread|' \
-            "contrib/$TRIPLET/lib/pkgconfig/llama.pc"
-          cat "contrib/$TRIPLET/lib/pkgconfig/llama.pc"
+          PREFIX="$PWD/contrib/$TRIPLET"
+          PC="$PREFIX/lib/pkgconfig/llama.pc"
+
+          # VLC links Windows plugins statically, so build static libraries.
+          # The static link needs the whole dependency closure, with mtmd in
+          # front of the libraries it depends on.
+          build_cpu() {
+            rm -rf llama.cpp/build
+            cmake -S llama.cpp -B llama.cpp/build \
+              -DCMAKE_SYSTEM_NAME=Windows \
+              -DCMAKE_C_COMPILER=$TRIPLET-gcc \
+              -DCMAKE_CXX_COMPILER=$TRIPLET-g++ \
+              -DCMAKE_RC_COMPILER=$TRIPLET-windres \
+              -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+              -DGGML_OPENMP=OFF \
+              -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
+              -DLLAMA_BUILD_SERVER=OFF -DLLAMA_BUILD_APP=OFF \
+              -DLLAMA_CURL=OFF -DGGML_NATIVE=OFF \
+              -DCMAKE_INSTALL_PREFIX="$PREFIX" || return 1
+            cmake --build llama.cpp/build -j"$(nproc)" || return 1
+            cmake --install llama.cpp/build || return 1
+            sed -i 's|^Libs:.*|Libs: -L${libdir} -lmtmd -lllama -lggml -lggml-cpu -lggml-base -lstdc++ -lwinpthread|' "$PC"
+          }
+
+          # Cross-build the Khronos Vulkan headers + loader (Apache-2.0, so
+          # the resulting vulkan-1.dll ships in the package) and llama.cpp
+          # with the Vulkan backend. glslc (host) compiles the shaders.
+          VK_TAG=vulkan-sdk-1.3.290.0
+          build_vulkan() {
+            apt-get update && apt-get install -y glslc || return 1
+            git clone --depth 1 --branch "$VK_TAG" \
+              https://github.com/KhronosGroup/Vulkan-Headers.git vk-headers || return 1
+            cmake -S vk-headers -B vk-headers/build \
+              -DCMAKE_INSTALL_PREFIX="$PREFIX" || return 1
+            cmake --install vk-headers/build || return 1
+            git clone --depth 1 --branch "$VK_TAG" \
+              https://github.com/KhronosGroup/Vulkan-Loader.git vk-loader || return 1
+            cmake -S vk-loader -B vk-loader/build \
+              -DCMAKE_SYSTEM_NAME=Windows \
+              -DCMAKE_C_COMPILER=$TRIPLET-gcc \
+              -DCMAKE_CXX_COMPILER=$TRIPLET-g++ \
+              -DCMAKE_RC_COMPILER=$TRIPLET-windres \
+              -DCMAKE_BUILD_TYPE=Release -DUSE_MASM=OFF \
+              -DENABLE_WERROR=OFF -DUPDATE_DEPS=OFF \
+              -DVULKAN_HEADERS_INSTALL_DIR="$PREFIX" \
+              -DCMAKE_INSTALL_PREFIX="$PREFIX" || return 1
+            cmake --build vk-loader/build -j"$(nproc)" || return 1
+            cmake --install vk-loader/build || return 1
+            VK_LIB=$(ls "$PREFIX"/lib/libvulkan-1.dll.a "$PREFIX"/lib/vulkan-1.lib \
+                        "$PREFIX"/lib/libvulkan.dll.a 2>/dev/null | head -1)
+            [ -n "$VK_LIB" ] || return 1
+            rm -rf llama.cpp/build
+            cmake -S llama.cpp -B llama.cpp/build \
+              -DCMAKE_SYSTEM_NAME=Windows \
+              -DCMAKE_C_COMPILER=$TRIPLET-gcc \
+              -DCMAKE_CXX_COMPILER=$TRIPLET-g++ \
+              -DCMAKE_RC_COMPILER=$TRIPLET-windres \
+              -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+              -DGGML_OPENMP=OFF -DGGML_VULKAN=ON \
+              -DVulkan_INCLUDE_DIR="$PREFIX/include" \
+              -DVulkan_LIBRARY="$VK_LIB" \
+              -DVulkan_GLSLC_EXECUTABLE="$(command -v glslc)" \
+              -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
+              -DLLAMA_BUILD_SERVER=OFF -DLLAMA_BUILD_APP=OFF \
+              -DLLAMA_CURL=OFF -DGGML_NATIVE=OFF \
+              -DCMAKE_INSTALL_PREFIX="$PREFIX" || return 1
+            cmake --build llama.cpp/build -j"$(nproc)" || return 1
+            cmake --install llama.cpp/build || return 1
+            sed -i 's|^Libs:.*|Libs: -L${libdir} -lmtmd -lllama -lggml -lggml-vulkan -lggml-cpu -lggml-base -lvulkan-1 -lstdc++ -lwinpthread|' "$PC"
+          }
+
+          if build_vulkan; then
+            echo "llama.cpp built with Vulkan GPU support"
+          else
+            echo "Vulkan cross-build unavailable, falling back to CPU-only"
+            build_cpu
+          fi
+          cat "$PC"
 
       - name: Build espeak-ng for Windows
         run: |
@@ -301,10 +395,16 @@ jobs:
           Everything runs on your computer. No account, no server, no ports
           to open — the Gemma 4 model is bundled in the gemma\ folder.
 
+          Your GPU is used automatically when a Vulkan-capable one is present
+          (much faster, keeps subtitles and voice-over in real time). Without
+          a GPU it runs on the CPU — on a slow computer expect the subtitles
+          to lag and only cover part of the speech.
+
           1. Run vlc.exe and open your video.
           2. Menu  View > Live Translation (Gemma 4).
-          3. Pick a language, tick Subtitles and/or Voice-over, press
-             Translate. The first line appears after a few seconds.
+          3. Pick a language, tick Subtitles and/or Voice-over, keep "Use the
+             GPU" ticked, press Translate. The first line appears after a few
+             seconds.
 
           The "Inference server" fields in the advanced preferences are only
           for people who want to point VLC at their own AI server; you do not
@@ -355,7 +455,8 @@ jobs:
           fi
           cat > notes.md << 'EOF'
           VLC with Gemma 4 live speech translation — ready to run, model
-          weights included.
+          weights included. Uses a Vulkan-capable GPU automatically for
+          real-time subtitles and voice-over, and falls back to the CPU.
 
           **Linux**: join the parts, unpack, run `./vlc-gemma/vlc.sh`
           ```

@@ -108,6 +108,7 @@ function start_translation()
     local lang = languages[ui.language:get_value()][2]
     local subs = ui.subs:get_checked()
     local voice = ui.voice:get_checked()
+    local gpu = ui.gpu:get_checked()
 
     if not subs and not voice then
         set_status("Choose subtitles, voice-over, or both.")
@@ -118,6 +119,9 @@ function start_translation()
     -- reads them when it is created just below.
     vlc.config.set("gemma-transcribe-language", lang)
     vlc.config.set("gemma-transcribe-voiceover", voice)
+    -- -1 offloads the whole model to the GPU (much faster, keeps up in
+    -- real time); 0 keeps everything on the CPU.
+    vlc.config.set("gemma-transcribe-gpu-layers", gpu and -1 or 0)
 
     -- Turn the audio filter on for the current output.
     local aout = vlc.object.aout()
@@ -196,15 +200,20 @@ function show_dialog()
     ui.voice = dlg:add_check_box("Speak a voice-over (dubbing)", false,
                                  3, 3, 2, 1)
 
-    ui.status = dlg:add_label(" ", 1, 4, 4, 1)
+    ui.gpu = dlg:add_check_box("Use the GPU (much faster — recommended)",
+                               true, 1, 4, 4, 1)
 
-    dlg:add_button("Translate", start_translation, 1, 5, 1, 1)
-    dlg:add_button("Stop", stop_translation, 2, 5, 1, 1)
-    dlg:add_button("Close", close, 4, 5, 1, 1)
+    ui.status = dlg:add_label(" ", 1, 5, 4, 1)
+
+    dlg:add_button("Translate", start_translation, 1, 6, 1, 1)
+    dlg:add_button("Stop", stop_translation, 2, 6, 1, 1)
+    dlg:add_button("Close", close, 4, 6, 1, 1)
 
     dlg:add_label("<small>Runs entirely on your computer with the bundled "
-        .. "Gemma 4 model — no account and no server needed.</small>",
-        1, 6, 4, 1)
+        .. "Gemma 4 model — no account and no server needed. If the "
+        .. "subtitles lag on a slow computer, keep the GPU box ticked; "
+        .. "without a GPU, translation stays on the CPU.</small>",
+        1, 7, 4, 1)
 
     if is_running() then
         set_status("Translation is on.")
