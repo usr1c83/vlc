@@ -63,7 +63,6 @@
 
 #include <errno.h>
 #include <math.h>
-#include <stdatomic.h>
 
 #include <vlc_common.h>
 #include <vlc_configuration.h>
@@ -81,9 +80,12 @@
 #define SEGMENT_MS_MIN  1000
 #define SEGMENT_MS_MAX  30000
 
-/* Number of segments allowed to sit in the inference pipeline before the
- * filter starts skipping segments to remain (near) real-time. */
-#define MAX_PENDING 3
+/* Maximum number of segments kept waiting in the inference pipeline. When
+ * inference cannot keep up with playback, the filter drops the oldest
+ * waiting segments and keeps the newest ones, so the subtitles and
+ * voice-over track the current playback position instead of falling
+ * further and further behind. A small backlog keeps latency low. */
+#define MAX_PENDING 2
 
 /* Maximum number of utterances voiced per segment */
 #define MAX_UTTERANCES 32
@@ -120,7 +122,8 @@ typedef struct
     /* Inference pipeline */
     vlc_queue_t queue;
     bool dead;
-    atomic_uint pending;
+    unsigned queued;      /* segments waiting in the queue (queue lock) */
+    unsigned dropped;     /* segments dropped while behind (queue lock) */
     vlc_thread_t thread;
 
     /* Voice-over mix FIFO (audio thread <-> worker thread) */
@@ -550,6 +553,24 @@ static void HandleUtterances(filter_t *filter, char *text, vlc_tick_t pts,
     }
 }
 
+/**
+ * Dequeues the next segment to transcribe, keeping the queue-depth counter
+ * consistent with the dequeue under a single lock. Returns NULL when the
+ * filter is being closed.
+ */
+static block_t *NextSegment(filter_sys_t *sys)
+{
+    vlc_queue_Lock(&sys->queue);
+    while (vlc_queue_IsEmpty(&sys->queue) && !sys->dead)
+        vlc_queue_Wait(&sys->queue);
+
+    block_t *segment = vlc_queue_DequeueUnlocked(&sys->queue);
+    if (segment != NULL)
+        sys->queued--;
+    vlc_queue_Unlock(&sys->queue);
+    return segment;
+}
+
 static void *Worker(void *data)
 {
     filter_t *filter = data;
@@ -558,8 +579,7 @@ static void *Worker(void *data)
 
     vlc_thread_set_name("vlc-gemma");
 
-    while ((segment = vlc_queue_DequeueKillable(&sys->queue,
-                                                &sys->dead)) != NULL)
+    while ((segment = NextSegment(sys)) != NULL)
     {
         const vlc_tick_t pts = segment->i_pts;
         const vlc_tick_t length = segment->i_length;
@@ -578,7 +598,6 @@ static void *Worker(void *data)
                 PublishText(filter, text, pts, length);
             free(text);
         }
-        atomic_fetch_sub(&sys->pending, 1);
     }
     return NULL;
 }
@@ -594,13 +613,6 @@ static void QueueSegment(filter_t *filter)
     if (sys->fill == 0)
         return;
 
-    if (atomic_load(&sys->pending) >= MAX_PENDING)
-    {   /* Inference is slower than real-time: skip this segment. */
-        msg_Warn(filter, "transcription too slow, skipping segment");
-        sys->fill = 0;
-        return;
-    }
-
     block_t *b = block_Alloc(sys->fill * sizeof (int16_t));
     if (unlikely(b == NULL))
     {
@@ -613,8 +625,33 @@ static void QueueSegment(filter_t *filter)
     b->i_length = vlc_tick_from_samples(sys->fill, TRANSCRIBE_RATE);
     sys->fill = 0;
 
-    atomic_fetch_add(&sys->pending, 1);
-    vlc_queue_Enqueue(&sys->queue, b);
+    unsigned dropped = 0;
+
+    vlc_queue_Lock(&sys->queue);
+    /* When inference falls behind playback, drop the oldest waiting
+     * segments so the pipeline always works on the most recent audio and
+     * the subtitles stay close to real time (at the cost of skipping the
+     * speech in between — enabling GPU offload avoids this). */
+    while (sys->queued >= MAX_PENDING)
+    {
+        block_t *old = vlc_queue_DequeueUnlocked(&sys->queue);
+        if (old == NULL)
+            break;
+        block_Release(old);
+        sys->queued--;
+        dropped = ++sys->dropped;
+    }
+    vlc_queue_EnqueueUnlocked(&sys->queue, b);
+    sys->queued++;
+    vlc_queue_Signal(&sys->queue);
+    vlc_queue_Unlock(&sys->queue);
+
+    /* Warn once, then every ~100 dropped segments, to hint at GPU offload
+     * without flooding the log. */
+    if (dropped == 1 || (dropped > 0 && dropped % 100 == 0))
+        msg_Warn(filter, "inference cannot keep up with playback, skipping "
+                 "audio; enable GPU offload (%sgpu-layers) or a shorter "
+                 "%ssegment-ms for lower latency", CFG_PREFIX, CFG_PREFIX);
 }
 
 static block_t *Process(filter_t *filter, block_t *in)
@@ -854,8 +891,8 @@ static int Open(vlc_object_t *obj)
 
     static const char *const options[] = {
         "backend", "url", "api-key", "model", "language", "segment-ms",
-        "prompt", "model-path", "mmproj-path", "threads", "download",
-        "model-url", "mmproj-url", "voiceover", "tts", "tts-url",
+        "prompt", "model-path", "mmproj-path", "threads", "gpu-layers",
+        "download", "model-url", "mmproj-url", "voiceover", "tts", "tts-url",
         "tts-api-key", "tts-model", "voices", "duck", "listen",
         "export-file", "export-audio", NULL
     };
@@ -927,7 +964,6 @@ static int Open(vlc_object_t *obj)
     OpenExports(filter, sys);
 
     vlc_queue_Init(&sys->queue, offsetof (block_t, p_next));
-    atomic_init(&sys->pending, 0);
     sys->dead = false;
 
     var_Create(vlc_object_instance(filter), GEMMA_TRANSCRIPT_VAR,
@@ -1033,6 +1069,14 @@ error:
 #define THREADS_TEXT N_("Inference threads")
 #define THREADS_LONGTEXT N_("Number of CPU threads used by the local " \
     "backend (0 = automatic).")
+
+#define GPU_TEXT N_("GPU acceleration (offloaded layers)")
+#define GPU_LONGTEXT N_("How many model layers the local backend runs on " \
+    "the GPU. -1 offloads the whole model to the GPU when a compatible one " \
+    "is detected, which is far faster than the CPU and lets the subtitles " \
+    "and voice-over keep up in real time; 0 forces CPU-only processing. " \
+    "This needs a VLC build with GPU (Vulkan) support — the ready-to-run " \
+    "release packages include it; otherwise processing stays on the CPU.")
 
 #define LANGUAGE_TEXT N_("Target language")
 #define LANGUAGE_LONGTEXT N_("Language the speech is translated into, " \
@@ -1147,6 +1191,8 @@ vlc_module_begin ()
                   MMPROJ_PATH_TEXT, MMPROJ_PATH_LONGTEXT )
     add_integer_with_range( CFG_PREFIX "threads", 0, 0, 256,
                             THREADS_TEXT, THREADS_LONGTEXT )
+    add_integer_with_range( CFG_PREFIX "gpu-layers", -1, -1, 1000,
+                            GPU_TEXT, GPU_LONGTEXT )
     add_bool( CFG_PREFIX "download", true, DOWNLOAD_TEXT, DOWNLOAD_LONGTEXT )
     add_string( CFG_PREFIX "model-url",
                 "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/"

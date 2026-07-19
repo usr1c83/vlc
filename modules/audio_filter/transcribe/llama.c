@@ -251,8 +251,22 @@ int transcribe_LocalOpen(filter_t *filter,
     if (threads <= 0)
         threads = vlc_GetCPUCount();
 
+    int64_t gpu_layers = var_InheritInteger(filter, CFG_PREFIX "gpu-layers");
+    const bool want_gpu = (gpu_layers != 0);
+
+    if (want_gpu && !llama_supports_gpu_offload())
+    {
+        msg_Warn(filter, "this VLC build has no GPU backend, running the "
+                 "model on the CPU; set %sgpu-layers to 0 to silence this",
+                 CFG_PREFIX);
+        gpu_layers = 0;
+    }
+
     struct llama_model_params mparams = llama_model_default_params();
     mparams.use_mmap = true;
+    /* A negative value offloads the whole model to the GPU; llama.cpp caps
+     * the count to the number of layers the model actually has. */
+    mparams.n_gpu_layers = (gpu_layers < 0) ? INT32_MAX : (int32_t)gpu_layers;
 
     msg_Info(filter, "loading Gemma model %s", model_path);
     sys->model = llama_model_load_from_file(model_path, mparams);
@@ -278,7 +292,7 @@ int transcribe_LocalOpen(filter_t *filter,
     }
 
     struct mtmd_context_params mtparams = mtmd_context_params_default();
-    mtparams.use_gpu = false;
+    mtparams.use_gpu = (gpu_layers != 0);
     mtparams.print_timings = false;
     mtparams.n_threads = threads;
     mtparams.warmup = false;
@@ -314,8 +328,8 @@ int transcribe_LocalOpen(filter_t *filter,
     if (sys->prompt == NULL)
         goto error;
 
-    msg_Dbg(filter, "local Gemma inference ready (%"PRId64" threads)",
-            threads);
+    msg_Info(filter, "local Gemma inference ready (%s, %"PRId64" threads)",
+             (gpu_layers != 0) ? "GPU" : "CPU", threads);
     free(model_path);
     free(mmproj_path);
 
