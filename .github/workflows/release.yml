@@ -302,6 +302,15 @@ jobs:
               -DCMAKE_CXX_SCAN_FOR_MODULES=OFF \
               -DCMAKE_INSTALL_PREFIX="$PREFIX" || return 1
             cmake --install vk-headers/build || return 1
+            # ggml-vulkan.cpp includes spirv/unified1/spirv.hpp; the host
+            # spirv-headers package is only on the host include path, so
+            # install SPIRV-Headers into the cross prefix for the target
+            # compile to find them.
+            git clone --depth 1 --branch "$VK_TAG" \
+              https://github.com/KhronosGroup/SPIRV-Headers.git spirv-headers-src || return 1
+            cmake -S spirv-headers-src -B spirv-headers-src/build \
+              -DCMAKE_INSTALL_PREFIX="$PREFIX" || return 1
+            cmake --install spirv-headers-src/build || return 1
             git clone --depth 1 --branch "$VK_TAG" \
               https://github.com/KhronosGroup/Vulkan-Loader.git vk-loader || return 1
             cmake -S vk-loader -B vk-loader/build \
